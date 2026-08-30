@@ -51,8 +51,22 @@ def generate_terrain(
     size: int,
     archetype: str = "hills",
     seed: int | None = None,
+    relief: float = 1.0,
+    water_level: float | None = None,
 ):
-    """Returns (terrain_height: float32[size,size], is_water: bool[size,size])."""
+    """
+    Returns (terrain_height: float32[size,size], is_water: bool[size,size]).
+
+    relief: how much the terrain varies. 1.0 = as designed per archetype.
+        Lower (e.g. 0.3) flattens toward gentle rolling ground; higher
+        (e.g. 1.5-2.0) exaggerates peaks and valleys. Does not affect
+        how much water there is -- that's controlled separately by
+        water_level, so the two knobs are independent.
+    water_level: 0-1 threshold below which ground counts as water,
+        measured on the *unscaled* normalized heightmap (before relief
+        is applied). Higher = more water. If None, uses each archetype's
+        default (0.2 for water-capable archetypes, none for the rest).
+    """
     if archetype not in TERRAIN_ARCHETYPES:
         raise ValueError(f"unknown terrain archetype {archetype!r}, choose from {TERRAIN_ARCHETYPES}")
 
@@ -96,6 +110,16 @@ def generate_terrain(
         has_water = True
 
     height = _normalize(height)
-    sea_level = 0.2 if has_water else -0.01
-    is_water = height <= sea_level
+
+    # water is decided on the un-relief-adjusted map, so "how much water"
+    # and "how much the terrain varies" stay independently controllable
+    default_water_level = 0.2 if has_water else -0.01
+    level = default_water_level if water_level is None else water_level
+    is_water = height <= level
+
+    # relief: push values away from (relief > 1) or toward (relief < 1)
+    # the mid-point, i.e. contrast-adjust the normalized heightmap
+    relief = max(relief, 0.0)
+    height = np.clip(0.5 + (height - 0.5) * relief, 0.0, 1.0)
+
     return height.astype(np.float32), is_water

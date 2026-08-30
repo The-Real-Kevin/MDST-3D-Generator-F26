@@ -46,20 +46,36 @@ def generate_buildings(
     archetype: str = "monocentric",
     num_clusters: int = 1,
     density: float = 0.5,
+    cluster_tightness: float = 0.5,
     seed: int | None = None,
 ):
-    """Returns (building_height: float32[size,size], land_use: uint8[size,size])."""
+    """
+    Returns (building_height: float32[size,size], land_use: uint8[size,size]).
+
+    density: 0-1, how likely a buildable cell near a cluster center is to
+        actually be a building (overall "how built-up" the city is).
+    cluster_tightness: 0-1, how tightly buildings hug their cluster
+        centers. Low (e.g. 0.1) = clusters blend into a broad built-up
+        area with soft edges; high (e.g. 0.9) = sharp, compact downtown
+        cores with empty ground shortly outside them. Independent of
+        density -- you can have a small dense core (high tightness, high
+        density) or a sprawling sparse city (low tightness, low density).
+    """
     size = terrain_height.shape[0]
     rng = np.random.default_rng(seed)
     density = float(np.clip(density, 0.05, 1.0))
+    cluster_tightness = float(np.clip(cluster_tightness, 0.01, 1.0))
 
     centers = _cluster_centers(archetype, size, num_clusters, rng)
+
+    # higher tightness -> smaller effective radius -> sharper falloff
+    spread = 0.5 * (1.0 - cluster_tightness) + 0.03
 
     yy, xx = np.mgrid[0:size, 0:size]
     intensity = np.zeros((size, size), dtype=np.float32)
     for cx, cy in centers:
         dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) / size
-        falloff = np.exp(-dist * (3.5 - 2.5 * density))
+        falloff = np.exp(-dist / spread)
         intensity = np.maximum(intensity, falloff)
 
     gy, gx = np.gradient(terrain_height)

@@ -13,10 +13,17 @@ Or, to open the result in the Blender UI immediately after building it:
 
 What it builds:
     - a "Terrain" mesh: a subdivided plane displaced by terrain_height,
-      with water cells left flat/low so you can add an ocean plane later
+      colored by land use (tan ground, blue water, green parks, dark
+      asphalt roads), with water cells left flat/low
     - a "Buildings" mesh: one box per building cell, merged into a single
-      mesh object (fast even at 128x128 -- thousands of boxes is fine for
-      a static mesh, just don't turn each into a separate Blender object)
+      mesh object, colored by height (grey short buildings, tan/yellow
+      mid-height, blue-grey tall ones) -- thresholds are computed per-city
+      from percentiles of that city's own building heights, so the
+      coloring adapts automatically instead of using fixed cutoffs
+
+Colors live in the COLORS dict near the top of this file -- edit those
+RGB tuples directly to change the palette, no need to touch the mesh-
+building logic below them.
 
 This is a deliberately simple, direct approach to get something real
 into Blender fast. The Geometry Nodes subgroup's job later in the
@@ -43,7 +50,32 @@ HEIGHT_SCALE = 8.0       # vertical exaggeration for terrain
 BUILDING_HEIGHT_SCALE = 1.0
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from citygen import CityGrid, LAND_BUILDING  # noqa: E402
+from citygen import CityGrid, LAND_BUILDING, LAND_GREEN, LAND_ROAD  # noqa: E402
+
+# name -> (R, G, B), 0-1 range
+COLORS = {
+    "ground": (0.78, 0.72, 0.55),    # light tan
+    "green": (0.30, 0.55, 0.25),     # park green
+    "road": (0.15, 0.15, 0.16),      # asphalt
+    "water": (0.10, 0.35, 0.55),     # blue
+    "building_short": (0.55, 0.55, 0.55),  # light grey
+    "building_mid": (0.70, 0.62, 0.45),    # light tan/yellow
+    "building_tall": (0.35, 0.42, 0.52),   # blue-grey
+}
+
+
+def get_or_create_material(name: str):
+    mat = bpy.data.materials.get(name)
+    if mat is not None:
+        return mat
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    r, g, b = COLORS[name]
+    if bsdf is not None:
+        bsdf.inputs["Base Color"].default_value = (r, g, b, 1.0)
+    mat.diffuse_color = (r, g, b, 1.0)  # also set for viewport solid shading
+    return mat
 
 
 def clear_scene():
@@ -62,12 +94,25 @@ def build_terrain(city: CityGrid):
             z = 0.0 if city.is_water[y, x] else float(city.terrain_height[y, x]) * HEIGHT_SCALE
             verts[y, x] = bm.verts.new((x * CELL_SIZE, y * CELL_SIZE, z))
 
+    # material slots, in a fixed order so we can assign by index
+    slot_names = ["ground", "water", "green", "road"]
     for y in range(size - 1):
         for x in range(size - 1):
-            bm.faces.new((verts[y, x], verts[y, x + 1], verts[y + 1, x + 1], verts[y + 1, x]))
+            face = bm.faces.new((verts[y, x], verts[y, x + 1], verts[y + 1, x + 1], verts[y + 1, x]))
+            if city.is_water[y, x]:
+                face.material_index = slot_names.index("water")
+            elif city.land_use[y, x] == LAND_GREEN:
+                face.material_index = slot_names.index("green")
+            elif city.land_use[y, x] == LAND_ROAD:
+                face.material_index = slot_names.index("road")
+            else:
+                face.material_index = slot_names.index("ground")
 
     bm.to_mesh(mesh)
     bm.free()
+
+    for name in slot_names:
+        mesh.materials.append(get_or_create_material(name))
 
     obj = bpy.data.objects.new("Terrain", mesh)
     bpy.context.collection.objects.link(obj)
@@ -80,6 +125,17 @@ def build_buildings(city: CityGrid):
     bm = bmesh.new()
 
     building_cells = np.argwhere(city.land_use == LAND_BUILDING)
+    heights = city.building_height[building_cells[:, 0], building_cells[:, 1]]
+    heights = heights[heights > 0]
+    # split into short/mid/tall by percentile within this city, so the
+    # coloring adapts to whatever height range this particular city has
+    if len(heights) > 0:
+        low_cut, high_cut = np.percentile(heights, [40, 75])
+    else:
+        low_cut, high_cut = 0.0, 0.0
+
+    slot_names = ["building_short", "building_mid", "building_tall"]
+
     for y, x in building_cells:
         base_z = float(city.terrain_height[y, x]) * HEIGHT_SCALE
         h = float(city.building_height[y, x]) * BUILDING_HEIGHT_SCALE
@@ -87,6 +143,13 @@ def build_buildings(city: CityGrid):
             continue
         cx, cy = x * CELL_SIZE, y * CELL_SIZE
         half = CELL_SIZE * 0.4  # small gap between adjacent buildings
+
+        if h < low_cut:
+            mat_idx = slot_names.index("building_short")
+        elif h < high_cut:
+            mat_idx = slot_names.index("building_mid")
+        else:
+            mat_idx = slot_names.index("building_tall")
 
         bottom = [
             bm.verts.new((cx - half, cy - half, base_z)),
@@ -100,14 +163,18 @@ def build_buildings(city: CityGrid):
             bm.verts.new((cx + half, cy + half, base_z + h)),
             bm.verts.new((cx - half, cy + half, base_z + h)),
         ]
-        bm.faces.new(bottom)
-        bm.faces.new(top[::-1])
+        new_faces = [bm.faces.new(bottom), bm.faces.new(top[::-1])]
         for i in range(4):
             j = (i + 1) % 4
-            bm.faces.new((bottom[i], bottom[j], top[j], top[i]))
+            new_faces.append(bm.faces.new((bottom[i], bottom[j], top[j], top[i])))
+        for face in new_faces:
+            face.material_index = mat_idx
 
     bm.to_mesh(mesh)
     bm.free()
+
+    for name in slot_names:
+        mesh.materials.append(get_or_create_material(name))
 
     obj = bpy.data.objects.new("Buildings", mesh)
     bpy.context.collection.objects.link(obj)
@@ -122,7 +189,6 @@ def main():
     build_terrain(city)
     build_buildings(city)
 
-    #out_path = str(Path(CITY_PATH).with_suffix(".blend"))
     out_path = str(Path(CITY_PATH).with_suffix(".blend").resolve())
     bpy.ops.wm.save_as_mainfile(filepath=out_path)
     print(f"saved {out_path}")

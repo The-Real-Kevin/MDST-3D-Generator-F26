@@ -41,6 +41,17 @@ python scripts/generate_city.py \
 - `--city`: monocentric, polycentric, linear
 - `--clusters`: number of building-density hotspots (ignored for monocentric)
 - `--density`: 0–1, how built-up the city is overall
+- `--cluster-tightness`: 0–1, how tightly buildings hug their cluster centers.
+  Low = clusters blend into a broad built-up area with soft edges; high =
+  sharp, compact downtown cores with empty ground shortly outside them.
+  Independent of `--density` — you can combine them freely (small dense
+  core, sprawling sparse city, etc).
+- `--relief`: how much the terrain varies. 1.0 = archetype default, lower
+  (e.g. 0.3) flattens toward gentle rolling ground, higher (e.g. 1.8)
+  exaggerates peaks and valleys. Independent of water coverage.
+- `--water-level`: 0–1 threshold for how much water there is (higher =
+  more). Defaults depend on the terrain archetype (0 for land-locked
+  archetypes like `hills`/`mountains`, ~0.2 for coastal/river ones).
 - `--seed`: fix for reproducible output, omit for random each run
 
 Prints summary stats (% water, % building, tallest building, etc.) so you
@@ -66,10 +77,24 @@ blender --background --python scripts/export_to_blender.py -- data/city_harbor.n
 
 Drop `--background` if you want the Blender UI to open with the result
 already loaded. This builds:
-- a **Terrain** mesh (displaced grid, water cells left flat)
-- a **Buildings** mesh (one box per building cell, merged into a single mesh)
+- a **Terrain** mesh (displaced grid, colored by land use: tan ground,
+  blue water, green parks, dark asphalt roads)
+- a **Buildings** mesh (one box per building cell, merged into a single
+  mesh, colored by height: grey short / tan-yellow mid / blue-grey tall,
+  thresholds computed per-city from that city's own height percentiles)
 
 and saves a `.blend` file next to your `.npz`.
+
+**To actually see the colors** when you open the `.blend` file: Blender's
+default "Solid" viewport shading mode shows a flat grey unless you tell it
+to use material colors. Either switch the viewport shading dropdown
+(top-right of the 3D viewport) to **Material Preview** or **Rendered**,
+or in Solid mode click the shading dropdown's arrow and set the color
+setting to **Material**.
+
+To change the palette, edit the `COLORS` dict near the top of
+`export_to_blender.py` — it's a plain `name -> (R, G, B)` mapping (0–1
+range each), no need to touch the mesh-building code below it.
 
 **Known limitation, by design:** this script builds plain boxes directly
 with `bmesh` — no Geometry Nodes yet. That's intentional for a first
@@ -97,8 +122,10 @@ blocking on each other.
 
 ## Known tuning TODOs (not bugs, just first-pass defaults)
 
-- Coastal/river water coverage is intentionally modest — tune the
-  subtraction strength and `sea_level` in `terrain.py` to taste.
+- `water_level`/`relief` interact loosely with archetype-specific shaping
+  (e.g. very high relief on `coastal_harbor` can push the coastline
+  around a bit) — fine for now, just don't expect them to be perfectly
+  orthogonal at extreme values.
 - Road placement is a naive fixed grid, not connected to the city
   archetype's actual center — fine for now, worth revisiting once
   Geometry Nodes needs proper road meshes.
