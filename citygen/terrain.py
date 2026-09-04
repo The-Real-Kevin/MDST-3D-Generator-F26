@@ -104,9 +104,12 @@ def generate_terrain(
     elif archetype == "river":
         height = base * 0.4
         wiggle = rng.uniform(0, 2 * np.pi)
-        river_path = size / 2 + (size / 8) * np.sin(yy / size * 3 * np.pi + wiggle)
+        river_amplitude = size / 5      # was size / 8 — smaller = straighter
+        river_frequency = 2 * np.pi    # was 3 * np.pi — smaller = fewer/gentler bends
+        river_half_width = size * 0.25   # was size * 0.04 — larger = wider river
+        river_path = size / 2 + river_amplitude * np.sin(yy / size * river_frequency + wiggle)
         river_dist = np.abs(xx - river_path)
-        height -= np.clip(1 - river_dist / (size * 0.04), 0, 1) * 0.5
+        height -= np.clip(1 - river_dist / river_half_width, 0, 1) * 0.5
         has_water = True
 
     height = _normalize(height)
