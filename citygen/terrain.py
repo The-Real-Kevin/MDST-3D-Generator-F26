@@ -4,7 +4,7 @@ Procedural terrain generation.
 This is the "rule-based generator" standing in for the future Terrain Model.
 It produces a smooth heightmap using multi-octave blurred noise, then shapes
 it into a named archetype (flat, hills, mountains, valley, coastal harbor,
-peninsula, river). Swapping this module out for a trained VAE later should
+peninsula, river). Swapping this module out for a trained model later should
 require no changes anywhere else in the pipeline -- it just needs to keep
 returning (height, is_water) arrays of the same shape.
 """
@@ -85,28 +85,43 @@ def generate_terrain(
         height = base ** 1.6 * 1.0
 
     elif archetype == "valley":
-        height = base * 0.5
-        center_dist = np.abs(yy - size / 2) / (size / 2)
+        height = base * 0.5  # overall bumpiness from noise -- higher = rougher valley walls, lower = smoother
+        center_dist = np.abs(yy - size / 2) / (size / 2)  # distance from horizontal centerline, normalized 0-1
+        # how deep/wide the valley carve is:
+        #   0.3  -> the "depth" of the valley (raise this for a deeper valley floor drop, lower for a shallower dip)
+        # note: the valley always runs horizontally through the vertical middle (yy == size/2) --
+        # swap yy for xx above if you want it running vertically instead
         height -= (1 - center_dist) * 0.3
 
     elif archetype == "coastal_harbor":
-        height = base * 0.5
+        height = base * 0.5  # overall bumpiness inland
+        # coastline carve:
+        #   size * 0.35  -> how far the coastline zone extends from the left edge (bigger = more of the map is coastal slope)
+        #   0.9          -> how strongly that zone is pushed down (bigger = deeper/more dramatic drop into the sea)
+        # note: coast is always on the left edge (xx == 0) -- swap xx for (size - xx) to put it on the right,
+        # or use yy instead of xx to put it on the top/bottom edge
         height -= np.clip(1 - xx / (size * 0.35), 0, 1) * 0.9
         has_water = True
 
     elif archetype == "peninsula":
-        height = base * 0.5
+        height = base * 0.5  # overall bumpiness of the landmass
+        # cx, cy: the peninsula's "anchor point" -- the land bulges out from here into the water
+        #   size * 0.3, size / 2  -> currently placed left-of-center, vertically centered
+        #   move cx/cy to reposition the peninsula anywhere on the grid
         cx, cy = size * 0.3, size / 2
-        dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) / size
+        dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) / size  # normalized distance from that anchor point
+        # peninsula size/steepness:
+        #   0.15  -> radius (in normalized units) of dry land around the anchor before water starts (bigger = bigger peninsula)
+        #   1.5   -> how quickly it drops off into water past that radius (bigger = steeper/sharper coastline, smaller = more gradual)
         height -= np.clip(dist - 0.15, 0, None) * 1.5
         has_water = True
 
     elif archetype == "river":
         height = base * 0.4
         wiggle = rng.uniform(0, 2 * np.pi)
-        river_amplitude = size / 5      # was size / 8 — smaller = straighter
-        river_frequency = 2 * np.pi    # was 3 * np.pi — smaller = fewer/gentler bends
-        river_half_width = size * 0.25   # was size * 0.04 — larger = wider river
+        river_amplitude = size / 5       # how far the river swings side to side
+        river_frequency = 2 * np.pi      # how many bends fit across the grid
+        river_half_width = size * 0.2   # river half-width
         river_path = size / 2 + river_amplitude * np.sin(yy / size * river_frequency + wiggle)
         river_dist = np.abs(xx - river_path)
         height -= np.clip(1 - river_dist / river_half_width, 0, 1) * 0.5
