@@ -23,6 +23,19 @@ TERRAIN_ARCHETYPES = (
     "river",
 )
 
+def _coastline_wobble(size, rng, amplitude, sigma_frac=0.06):
+    """
+    Zero-mean smooth noise used to perturb a coastline boundary so it's
+    jagged and organic instead of a perfect mathematical curve. Add this
+    directly to a distance/width value before comparing it to a threshold.
+    sigma_frac controls how coarse the wobbles are (bigger = broader,
+    gentler bends; smaller = tighter, more frequent zigzags).
+    """
+    noise = rng.normal(size=(size, size)).astype(np.float32)
+    noise = gaussian_filter(noise, sigma=size * sigma_frac)
+    noise = (noise - noise.mean()) / (noise.std() + 1e-8)
+    return noise * amplitude
+
 
 def _fractal_noise(size: int, rng: np.random.Generator, base_scale: float,
                     octaves: int = 4, persistence: float = 0.5) -> np.ndarray:
@@ -79,7 +92,42 @@ def generate_terrain(
         height = base * 0.1
 
     elif archetype == "hills":
-        height = base * 0.4
+        # Several distinct hills of different sizes, island-like, separated by
+        # a thin branching network of water (rivers) rather than one smooth
+        # bumpy landmass. Built with a Voronoi-style trick: each hill "claims"
+        # the ground closest to it, and the boundary between two neighboring
+        # hills' territory is naturally a thin line (the gap between distance-
+        # to-nearest and distance-to-second-nearest hill is small only right
+        # at that boundary) -- that's what becomes the river network.
+        num_hills = rng.integers(6, 11)  # how many separate hills -- widen this range for more/fewer
+        hill_cy = rng.uniform(size * 0.1, size * 0.9, size=num_hills)
+        hill_cx = rng.uniform(size * 0.1, size * 0.9, size=num_hills)
+        hill_radius = rng.uniform(size * 0.10, size * 0.24, size=num_hills)  # different sizes per hill
+
+        dists = np.stack([np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2) for cy, cx in zip(hill_cy, hill_cx)], axis=0)
+        sorted_idx = np.argsort(dists, axis=0)
+        dist_nearest = np.take_along_axis(dists, sorted_idx[:1], axis=0)[0]
+        dist_second_nearest = np.take_along_axis(dists, sorted_idx[1:2], axis=0)[0]
+        radius_per_cell = hill_radius[sorted_idx[0]]  # each cell uses ITS nearest hill's own radius
+
+        # rounded dome shape for each hill, based on distance to its own center
+        hill_bump = np.clip(1 - dist_nearest / radius_per_cell, 0, 1) ** 1.4
+
+        # perturb the Voronoi boundary for a natural winding line instead of a
+        # perfectly straight geometric edge
+        wobble = _coastline_wobble(size, rng, amplitude=size * 0.015, sigma_frac=0.035)
+        # small only right at the boundary between two neighboring hills' territory
+        voronoi_gap = (dist_second_nearest - dist_nearest) + wobble
+        channel_half_width = size * 0.022  # how thick the water lines are -- bigger = wider rivers
+        is_channel = voronoi_gap < channel_half_width
+
+        # bimodal height, same trick as coastal_harbor/peninsula: land gets a
+        # clear +0.3 boost so it's cleanly separated from the channel's flat
+        # low value -- without this, ordinary low ground far from any hill can
+        # spuriously dip below the water threshold too, showing up as stray
+        # ponds that have nothing to do with the actual channel network
+        height = np.where(is_channel, base * 0.05, base * 0.35 + hill_bump * 0.5 + 0.3)
+        has_water = True
 
     elif archetype == "mountains":
         height = base ** 1.6 * 1.0
@@ -94,26 +142,53 @@ def generate_terrain(
         height -= (1 - center_dist) * 0.3
 
     elif archetype == "coastal_harbor":
-        height = base * 0.5  # overall bumpiness inland
-        # coastline carve:
-        #   size * 0.35  -> how far the coastline zone extends from the left edge (bigger = more of the map is coastal slope)
-        #   0.9          -> how strongly that zone is pushed down (bigger = deeper/more dramatic drop into the sea)
-        # note: coast is always on the left edge (xx == 0) -- swap xx for (size - xx) to put it on the right,
-        # or use yy instead of xx to put it on the top/bottom edge
-        height -= np.clip(1 - xx / (size * 0.35), 0, 1) * 0.9
+        # Land everywhere EXCEPT a bay-shaped region reaching in from the
+        # right edge -- we define the WATER directly as an explicit region
+        # (an ellipse, jittered by noise) rather than carving a height dip and
+        # hoping a threshold catches it. This is what makes the coastline
+        # jagged/natural instead of looking like a smooth shape stamped into
+        # the ground.
+        height = base * 0.5  # bumpiness on land (irrelevant inside the bay, overwritten below)
+        bay_reach = size * 0.5        # how far inland the bay reaches
+        bay_half_width = size * 0.26  # how wide the bay is (top-to-bottom)
+        # pulling the center left of the edge by LESS than bay_reach guarantees
+        # the ellipse's far side extends past the grid boundary -- that's what
+        # keeps the mouth open to the sea instead of an enclosed lake
+        bay_center_x = size - bay_reach * 0.45
+        bay_center_y = size / 2  # vertical placement -- move to reposition
+        ellipse_dist = np.sqrt(((xx - bay_center_x) / bay_reach) ** 2 + ((yy - bay_center_y) / bay_half_width) ** 2)
+        # perturb the boundary itself (not the height!) for a jagged coastline.
+        # amplitude ~0.15-0.2 gives a noticeably irregular edge; sigma_frac
+        # controls how chunky/smooth the wobbles look
+        wobble = _coastline_wobble(size, rng, amplitude=0.18, sigma_frac=0.05)
+        is_water_bay = (ellipse_dist + wobble) < 1.0
+        # bimodal height: land gets real bumpy terrain, water gets a flat low
+        # baseline -- this clean separation is what makes the shared water-level
+        # threshold downstream reliably recover exactly this mask, regardless
+        # of exactly where the threshold is set
+        height = np.where(is_water_bay, base * 0.05, base * 0.5 + 0.3)
         has_water = True
 
     elif archetype == "peninsula":
-        height = base * 0.5  # overall bumpiness of the landmass
-        # cx, cy: the peninsula's "anchor point" -- the land bulges out from here into the water
-        #   size * 0.3, size / 2  -> currently placed left-of-center, vertically centered
-        #   move cx/cy to reposition the peninsula anywhere on the grid
-        cx, cy = size * 0.3, size / 2
-        dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) / size  # normalized distance from that anchor point
-        # peninsula size/steepness:
-        #   0.15  -> radius (in normalized units) of dry land around the anchor before water starts (bigger = bigger peninsula)
-        #   1.5   -> how quickly it drops off into water past that radius (bigger = steeper/sharper coastline, smaller = more gradual)
-        height -= np.clip(dist - 0.15, 0, None) * 1.5
+        # A strip of land attached to the top edge only, narrowing as it
+        # extends south, with water on both sides and past the tip -- defined
+        # as an explicit land mask (with a jittered boundary) rather than a
+        # height carve, so it never accidentally spans edge-to-edge and the
+        # coastline looks organic instead of a smooth wedge.
+        height = base * 0.5  # bumpiness on land (irrelevant off-land, overwritten below)
+        cx = size / 2  # horizontal centerline the peninsula hangs from -- move to reposition left/right
+        attach_half_width = size * 0.35  # half-width at the top attachment point -- keep this under size/2 so water flanks it immediately, even at the very top edge
+        taper_length = size * 0.85  # how far down the peninsula extends before its tip
+        # taper shrinks from 1.0 (full width) at the top to 0 (a point) near
+        # taper_length; the two exponents shape the curve to stay fuller
+        # through the middle and pinch in more sharply near the tip
+        taper = np.clip(1 - (yy / taper_length) ** 1.4, 0, 1) ** 0.7
+        width_at_row = attach_half_width * taper
+        # perturb the boundary itself for a jagged coastline -- same idea as coastal_harbor above
+        wobble = _coastline_wobble(size, rng, amplitude=size * 0.045, sigma_frac=0.06)
+        dist_from_axis = np.abs(xx - cx)
+        is_land_pen = dist_from_axis < (width_at_row + wobble)
+        height = np.where(is_land_pen, base * 0.5 + 0.3, base * 0.05)
         has_water = True
 
     elif archetype == "river":

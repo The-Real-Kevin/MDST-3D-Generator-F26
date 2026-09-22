@@ -66,9 +66,9 @@ CITY_ARCHETYPE_PHRASES = {
 
 # (low, high) numeric range, [phrases]
 NUM_CLUSTERS_LEVELS = [
-    ((1, 2), ["with just one or two hubs", "with a couple of centers"]),
-    ((3, 4), ["with a handful of clusters", "with several separate hubs"]),
-    ((5, 6), ["with many scattered clusters", "with a large number of distinct hubs"]),
+    ((1, 2), ["with just one or two hubs", "with a couple of centers", "with two centers", "with one main hub"]),
+    ((3, 4), ["with a handful of clusters", "with several separate hubs", "with three centers", "with four hubs", "with three separate districts"]),
+    ((5, 6), ["with many scattered clusters", "with a large number of distinct hubs", "with five centers", "with six hubs", "with five separate districts"]),
 ]
 
 DENSITY_LEVELS = [
@@ -102,11 +102,12 @@ GREEN_AMOUNT_LEVELS = [
     ((0.0, 0.15), ["with very few parks", "with almost no greenery"]),
     ((0.15, 0.4), ["with some green spaces", "with a handful of parks"]),
     ((0.4, 0.7), ["with lots of green areas", "with many parks scattered around", "full of parks and trees"]),
-    ((0.7, 1.0), ["covered almost entirely in greenery", "mostly parks and forest"]),
+    ((0.7, 1.0), ["covered almost entirely in greenery", "mostly parks and forest", "covered in green space", "mostly green space throughout"]),
 ]
 
 ROAD_CONTINUITY_LEVELS = [
-    ((0.0, 0.3), ["with a broken, patchy street network", "with disconnected, fragmented roads"]),
+    ((0.0, 0.15), ["with almost no roads at all", "with barely any streets", "with very few roads"]),
+    ((0.15, 0.3), ["with a broken, patchy street network", "with disconnected, fragmented roads"]),
     ((0.3, 0.7), ["with a fairly normal street layout", "with an ordinary road network"]),
     ((0.7, 1.0), ["with a fully connected grid of streets", "with a dense, well-connected road network"]),
 ]
@@ -136,7 +137,37 @@ def generate_example(rng: random.Random) -> dict:
     params = default_vector()
     mentioned_phrases = []
 
+    # num_clusters and city_archetype are resolved together, first, before
+    # the generic per-parameter loop below -- they're the one pair with a
+    # real logical coupling in natural language (mentioning several named
+    # clusters/hubs always implies a non-monocentric layout), so handling
+    # them together guarantees the generated text and its labels never
+    # contradict each other (e.g. "five centers" paired with a
+    # "single downtown core" label, or vice versa in the text itself).
+    num_clusters_spec = PARAM_BY_NAME["num_clusters"]
+    city_archetype_spec = PARAM_BY_NAME["city_archetype"]
+
+    num_clusters_mentioned = rng.random() <= num_clusters_spec.mention_prob
+    if num_clusters_mentioned:
+        value, phrase = _sample_continuous(rng, "num_clusters", NUM_CLUSTERS_LEVELS)
+        params["num_clusters"] = value
+        mentioned_phrases.append(phrase)
+    implies_non_monocentric = num_clusters_mentioned and params["num_clusters"] > 2.0
+
+    if rng.random() <= city_archetype_spec.mention_prob:
+        choices = [c for c in city_archetype_spec.choices if c != "monocentric"] if implies_non_monocentric else city_archetype_spec.choices
+        value = rng.choice(choices)
+        phrase = rng.choice(CITY_ARCHETYPE_PHRASES[value])
+        params["city_archetype"] = value
+        mentioned_phrases.append(phrase)
+    elif implies_non_monocentric:
+        # not textually mentioned, but num_clusters already implied it --
+        # correct the label without adding redundant text
+        params["city_archetype"] = rng.choice(["polycentric", "linear"])
+
     for spec in PARAM_BY_NAME.values():
+        if spec.name in ("num_clusters", "city_archetype"):
+            continue  # already handled above
         if rng.random() > spec.mention_prob:
             continue  # not mentioned in this example -> stays at schema default
 
@@ -144,15 +175,6 @@ def generate_example(rng: random.Random) -> dict:
             value = rng.choice(spec.choices)
             phrase = rng.choice(TERRAIN_PHRASES[value])
             params["terrain"] = value
-
-        elif spec.name == "city_archetype":
-            value = rng.choice(spec.choices)
-            phrase = rng.choice(CITY_ARCHETYPE_PHRASES[value])
-            params["city_archetype"] = value
-
-        elif spec.name == "num_clusters":
-            value, phrase = _sample_continuous(rng, spec.name, NUM_CLUSTERS_LEVELS)
-            params["num_clusters"] = value
 
         elif spec.name == "density":
             value, phrase = _sample_continuous(rng, spec.name, DENSITY_LEVELS)

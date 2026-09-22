@@ -31,6 +31,7 @@ from text2city.schema import PARAM_SCHEMA
 from text2city.dataset import load_rows, build_targets, train_val_split
 from text2city.embedders import load_embedder
 from text2city.model import TextToCityParams, decode_batch
+from text2city.freshness import check_staleness
 
 
 # Hand-written sentences -- deliberately phrased differently from every
@@ -47,9 +48,10 @@ HANDWRITTEN_EXAMPLES = [
 ]
 
 
-def load_checkpoint(checkpoint_dir: str):
+def load_checkpoint(checkpoint_dir: str, dataset_path: str = "data/text2city_dataset.csv"):
     ckpt_dir = Path(checkpoint_dir)
     ckpt = torch.load(ckpt_dir / "model.pt", map_location="cpu", weights_only=False)
+    check_staleness(ckpt.get("fingerprint"), dataset_path)
     model = TextToCityParams(embedding_dim=ckpt["embedding_dim"], hidden_dim=ckpt["hidden_dim"])
     model.load_state_dict(ckpt["model_state"])
     model.eval()
@@ -74,7 +76,7 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
-    model, embedder = load_checkpoint(args.checkpoint)
+    model, embedder = load_checkpoint(args.checkpoint, args.dataset)
 
     # --- 1. held-out synthetic examples ---
     rows = load_rows(args.dataset)

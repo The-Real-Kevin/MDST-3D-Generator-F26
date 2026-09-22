@@ -26,12 +26,14 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from text2city.schema import to_generator_kwargs  # noqa: E402
 from text2city.embedders import load_embedder  # noqa: E402
 from text2city.model import TextToCityParams, decode_batch  # noqa: E402
+from text2city.freshness import check_staleness  # noqa: E402
 from generate_city import build_city  # noqa: E402
 
 
-def load_checkpoint(checkpoint_dir: str):
+def load_checkpoint(checkpoint_dir: str, dataset_path: str = "data/text2city_dataset.csv"):
     ckpt_dir = Path(checkpoint_dir)
     ckpt = torch.load(ckpt_dir / "model.pt", map_location="cpu", weights_only=False)
+    check_staleness(ckpt.get("fingerprint"), dataset_path)
     model = TextToCityParams(embedding_dim=ckpt["embedding_dim"], hidden_dim=ckpt["hidden_dim"])
     model.load_state_dict(ckpt["model_state"])
     model.eval()
@@ -52,13 +54,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("text", type=str, help="natural-language city description")
     parser.add_argument("--checkpoint", type=str, default="text2city/checkpoint")
+    parser.add_argument("--dataset", type=str, default="data/text2city_dataset.csv",
+                         help="used only to check the checkpoint isn't stale relative to it")
     parser.add_argument("--size", type=int, default=128)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--out", type=str, default="data/from_text.npz")
     parser.add_argument("--preview", action="store_true", help="also save a 2D preview PNG")
     args = parser.parse_args()
 
-    model, embedder = load_checkpoint(args.checkpoint)
+    model, embedder = load_checkpoint(args.checkpoint, args.dataset)
     params = predict_params(model, embedder, args.text)
 
     print(f'"{args.text}"\n')

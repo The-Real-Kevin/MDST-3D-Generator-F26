@@ -40,12 +40,12 @@ PARAM_SCHEMA: list[ParamSpec] = [
     ParamSpec(
         name="terrain", kind="categorical", default="hills",
         choices=["flat", "hills", "mountains", "valley", "coastal_harbor", "peninsula", "river"],
-        mention_prob=0.55,
+        mention_prob=0.8,
     ),
     ParamSpec(
         name="city_archetype", kind="categorical", default="monocentric",
         choices=["monocentric", "polycentric", "linear"],
-        mention_prob=0.35,
+        mention_prob=0.65,
     ),
     ParamSpec(
         name="num_clusters", kind="continuous", default=1.0,

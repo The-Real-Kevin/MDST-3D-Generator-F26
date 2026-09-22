@@ -26,6 +26,7 @@ from text2city.schema import PARAM_SCHEMA
 from text2city.dataset import load_rows, build_targets, train_val_split
 from text2city.embedders import get_embedder
 from text2city.model import TextToCityParams
+from text2city.freshness import fingerprint_sources
 
 
 def compute_class_weights(targets: dict, train_idx) -> dict:
@@ -174,6 +175,7 @@ def main():
         "embedding_dim": embeddings.shape[1],
         "hidden_dim": args.hidden_dim,
         "embedder_kind": args.embedder,
+        "fingerprint": fingerprint_sources(args.dataset),
     }, out_dir / "model.pt")
     embedder.save(str(out_dir / f"embedder.{('pkl' if args.embedder == 'tfidf' else 'txt')}"))
     print(f"\nsaved checkpoint to {out_dir}/")
