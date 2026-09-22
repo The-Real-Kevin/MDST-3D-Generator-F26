@@ -157,6 +157,7 @@ ENV/
 env.bak/
 venv.bak/
 data/
+text2city/checkpoint/
 
 # Spyder project settings
 .spyderproject
