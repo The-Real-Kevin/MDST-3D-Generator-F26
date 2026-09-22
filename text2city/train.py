@@ -28,7 +28,32 @@ from text2city.embedders import get_embedder
 from text2city.model import TextToCityParams
 
 
-def compute_loss(raw_outputs: dict, targets: dict, device) -> tuple:
+def compute_class_weights(targets: dict, train_idx) -> dict:
+    """
+    Inverse-frequency class weights for each categorical parameter, computed
+    from the training split. Needed because some categorical parameters have
+    a schema default that ALSO happens to be one of the valid choices (e.g.
+    city_archetype defaults to "monocentric", which is also a real choice) --
+    so unmentioned examples inflate that class's frequency on top of its own
+    share of explicit mentions. Left unweighted, cross-entropy loss will
+    happily lean on that majority-class prior whenever a sentence's wording
+    only weakly overlaps the training vocabulary, instead of learning to
+    actually discriminate the minority classes. Weighting by inverse
+    frequency removes that shortcut.
+    """
+    weights = {}
+    for spec in PARAM_SCHEMA:
+        if spec.kind != "categorical":
+            continue
+        train_targets = targets[spec.name][train_idx]
+        counts = np.array([np.sum(train_targets == i) for i in range(len(spec.choices))], dtype=np.float32)
+        counts = np.maximum(counts, 1)  # avoid divide-by-zero for an unseen class
+        inv_freq = 1.0 / counts
+        weights[spec.name] = torch.tensor(inv_freq / inv_freq.sum() * len(spec.choices), dtype=torch.float32)
+    return weights
+
+
+def compute_loss(raw_outputs: dict, targets: dict, device, class_weights: dict) -> tuple:
     """Returns (total_loss, dict of per-parameter loss values for logging)."""
     total = torch.tensor(0.0, device=device)
     per_param = {}
@@ -36,7 +61,7 @@ def compute_loss(raw_outputs: dict, targets: dict, device) -> tuple:
         pred = raw_outputs[spec.name]
         target = torch.tensor(targets[spec.name], device=device)
         if spec.kind == "categorical":
-            loss = nn.functional.cross_entropy(pred, target)
+            loss = nn.functional.cross_entropy(pred, target, weight=class_weights[spec.name].to(device))
         elif spec.kind == "continuous":
             loss = nn.functional.mse_loss(torch.sigmoid(pred.squeeze(-1)), target)
         elif spec.kind == "binary":
@@ -95,6 +120,10 @@ def main():
     train_idx, val_idx = train_val_split(n, args.val_fraction, seed=args.seed)
     print(f"{n} examples ({len(train_idx)} train / {len(val_idx)} val)")
 
+    class_weights = compute_class_weights(targets, train_idx)
+    for name, w in class_weights.items():
+        print(f"  class weights for {name}: {[round(x, 2) for x in w.tolist()]}")
+
     print(f"building '{args.embedder}' embedder ...")
     t0 = time.time()
     embedder = get_embedder(args.embedder)
@@ -117,7 +146,7 @@ def main():
             batch_targets = {k: v[batch_idx] for k, v in targets.items()}
 
             raw = model(batch_emb)
-            loss, _ = compute_loss(raw, batch_targets, device)
+            loss, _ = compute_loss(raw, batch_targets, device, class_weights)
 
             optimizer.zero_grad()
             loss.backward()

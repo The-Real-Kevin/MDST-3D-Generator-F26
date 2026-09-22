@@ -1,15 +1,3 @@
-# torch: left unpinned deliberately. On Intel Macs, PyTorch only ships
-# wheels up through 2.2.2 (dropped after that) -- pinning a higher
-# version here would make installation impossible on those machines.
-torch
-# numpy<2: torch wheels built before ~2.3 were compiled against NumPy 1.x
-# internals and crash (ABI mismatch) if NumPy 2.x is installed alongside
-# them. Needed specifically for anyone stuck on torch<2.3 (e.g. Intel Macs).
-numpy<2
-scikit-learn
-# sentence-transformers<6.0: v6.0 pulls in transformers v5.x, which
-# refuses to enable its PyTorch backend unless torch>=2.5 is installed --
-# which is impossible on Intel Macs (see the torch note above). Pinning
-# below 6.0 keeps it on an older transformers version that works fine
-# with older torch.
-sentence-transformers<6.0
+numpy
+scipy
+matplotlib

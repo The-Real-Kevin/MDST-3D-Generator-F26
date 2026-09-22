@@ -48,6 +48,29 @@ python text2city/infer.py "a seaside city with a dense center and lots of green 
 blender --background --python scripts/export_to_blender.py -- data/from_text.npz
 ```
 
+**If `torch` errors on import with a NumPy ABI warning** (`_ARRAY_API not
+found`, or `Could not infer dtype of numpy.float32`): an old `torch`
+(built before NumPy 2.x support existed) is now sitting next to NumPy 2.x.
+Fix: `pip install "numpy<2"`. Don't chase a torch upgrade first —
+**on Intel Macs, PyTorch only ships wheels up through 2.2.2** (dropped
+support after that), so torch 2.2.2 may simply be the ceiling on that
+machine, full stop, and `numpy<2` is the actual fix, not a workaround.
+
+**If you also see `[transformers] Disabling PyTorch because PyTorch >= 2.5
+is required but found ...` or a crash with `NameError: name 'nn' is not
+defined` inside `transformers/integrations/accelerate.py`**: recent
+`transformers`/`sentence-transformers` releases check the installed torch
+version and refuse to enable their PyTorch backend below a rising minimum
+(2.4, then 2.5, then higher) -- impossible to satisfy on an Intel Mac
+capped at torch 2.2.2, and this mismatch has caused real import crashes,
+not just warnings. Fix: pin an older, confirmed-stable trio instead of
+chasing "latest" --
+```bash
+pip uninstall -y sentence-transformers transformers huggingface-hub tokenizers safetensors
+pip install "sentence-transformers==2.2.2" "transformers==4.30.2" "huggingface-hub==0.16.4"
+```
+Already pinned this way in `text2city/requirements.txt`.
+
 ## What actually happened when I ran this (tfidf embedder)
 
 **Training:** 6,000 examples, 8.4 seconds on CPU — comfortably inside your
@@ -106,6 +129,45 @@ present this: **run `train.py --embedder sentence-transformer` and
 re-check this exact prompt** — if terrain correctly comes out
 `coastal_harbor`, that's a clean, tell-able story about why the pretrained
 embedding matters.
+
+## Update: fixed a real class-imbalance bug, found a real TF-IDF ceiling
+
+After the previous run, real-world testing surfaced a genuine problem:
+**`city_archetype` and `terrain` both have a schema default that is ALSO
+one of their valid choices** (`monocentric`, `hills`). Since ~65-45% of
+examples don't mention these parameters at all and fall back to that
+default, the default class ends up wildly overrepresented in training —
+confirmed by checking the actual data: `monocentric` was 76% of the
+dataset, `hills` was 52%. Any sentence whose wording only weakly overlaps
+the training vocabulary gets pulled toward that majority-class prior
+instead of the correct answer.
+
+**What I tried, in order, testing each before moving to the next:**
+1. Class-weighted cross-entropy loss (weighting each class inversely to
+   its frequency). Retrained and re-tested on the exact phrases that had
+   failed — this did NOT reliably help, and even flipped one previously-
+   correct case to wrong. Kept it anyway (it is good general practice and
+   doesn't hurt held-out accuracy), but it wasn't the real fix.
+2. Widened the TF-IDF vocabulary (400 → 1200 features) and added more
+   phrase variety to `generate_dataset.py`'s phrase banks (more synonyms
+   for polycentric/linear, and "seaside" phrasing restored for coastal).
+   Retrained and re-tested the same failing phrases — this genuinely
+   worked: `"a city with two separate downtown areas"` now correctly
+   predicts `polycentric` (was `monocentric`), `"a long narrow city"`
+   now correctly predicts `linear`, while `"a small quiet town"` (a
+   genuine default case, no real signal either way) still correctly
+   stays `monocentric` rather than over-correcting.
+
+**What's still a genuine, confirmed ceiling, not a bug**: `"a seaside
+city..."` still predicts `hills`, not `coastal_harbor` — even though
+"seaside" is now literally in the fitted vocabulary. I checked why: it
+only appears in 2 of roughly 50 terrain phrase entries, so its learned
+weight still isn't strong enough to overcome the "hills" majority prior.
+No amount of tfidf tuning fixes this cleanly, because TF-IDF only knows
+"has this exact word appeared, and how often" — it has no notion that
+"seaside" and "coastal" mean the same thing. This is exactly the
+capability a real sentence-transformer adds for free, without needing
+dozens of manually-written synonym phrases for every concept.
 
 ## Independent variation (per your Step 1 requirement)
 

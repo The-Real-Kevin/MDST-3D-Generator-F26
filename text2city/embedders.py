@@ -39,7 +39,7 @@ import numpy as np
 class TfidfEmbedder:
     kind = "tfidf"
 
-    def __init__(self, max_features: int = 400):
+    def __init__(self, max_features: int = 1200):
         from sklearn.feature_extraction.text import TfidfVectorizer
         self.vectorizer = TfidfVectorizer(max_features=max_features, ngram_range=(1, 2))
         self._fitted = False

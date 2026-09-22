@@ -53,15 +53,15 @@ TERRAIN_PHRASES = {
     "hills": ["set in rolling hills", "spread across gentle hills", "on hilly terrain"],
     "mountains": ["surrounded by mountains", "nestled in rugged mountains", "high in the mountains"],
     "valley": ["nestled in a deep valley", "tucked into a valley", "set in a river valley"],
-    "coastal_harbor": ["built around a harbor", "hugging the coastline", "by the sea", "on the coast"],
+    "coastal_harbor": ["built around a harbor", "hugging the coastline", "by the sea", "on the coast", "a seaside setting", "along the seaside"],
     "peninsula": ["built on a peninsula", "surrounded by water on three sides", "on a narrow peninsula"],
     "river": ["split by a winding river", "built along a river", "with a river cutting through it"],
 }
 
 CITY_ARCHETYPE_PHRASES = {
     "monocentric": ["with a single downtown core", "built around one central business district", "with one clear city center"],
-    "polycentric": ["with several distinct business districts", "made up of multiple downtown clusters", "with scattered urban centers"],
-    "linear": ["stretched out in a long corridor", "elongated along a single axis", "laid out in a line"],
+    "polycentric": ["with several distinct business districts", "made up of multiple downtown clusters", "with scattered urban centers", "with multiple business hubs", "with two separate downtown areas", "made up of several separate city centers"],
+    "linear": ["stretched out in a long corridor", "elongated along a single axis", "laid out in a line", "long and narrow", "thin and elongated in shape"],
 }
 
 # (low, high) numeric range, [phrases]
