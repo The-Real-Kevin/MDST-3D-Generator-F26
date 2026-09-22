@@ -19,6 +19,8 @@ scripts/
     generate_city.py     # CLI: generate one city, save as .npz
     visualize_2d.py       # quick matplotlib preview of a saved city
     export_to_blender.py  # run INSIDE Blender to build real 3D geometry
+text2city/                # text -> city-parameters ML model (separate
+                           # requirements + README, see text2city/README.md)
 data/                     # generated .npz cities land here by default
 ```
 
@@ -27,6 +29,15 @@ data/                     # generated .npz cities land here by default
 ```bash
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
+```
+
+This installs only what the procedural generator itself needs
+(numpy/scipy/matplotlib). The `text2city/` ML pipeline (text-to-parameter
+model) has its **own separate** requirements file — see
+[`text2city/README.md`](text2city/README.md) for full setup and usage:
+
+```bash
+pip install -r text2city/requirements.txt   # same venv, no need for a second one
 ```
 
 ## 1. Generate a city
@@ -118,6 +129,17 @@ end-to-end pass. The Geometry Nodes subgroup's job is to replace this with
 a proper node-based system that reads the same `CityGrid` arrays as input
 and can do things a simple loop can't easily do (varied footprints, roof
 detail, road meshes with actual width/geometry, non-square city shapes).
+
+## 4. Generate a city from a text description (ML model)
+
+A separate module, `text2city/`, trains a small model that takes a plain-
+English description ("a seaside city with a dense center and lots of green
+space") and predicts values for all the parameters above automatically,
+then calls straight into `generate_city.py`. It has its own setup, training,
+evaluation, and usage instructions — see
+[`text2city/README.md`](text2city/README.md), which also documents two real
+issues found while testing it (one bug that's already fixed, one embedder
+limitation worth knowing about before you present this).
 
 ## Data format reference
 
