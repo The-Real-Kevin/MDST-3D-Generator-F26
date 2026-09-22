@@ -71,8 +71,6 @@ pip install "sentence-transformers==2.2.2" "transformers==4.30.2" "huggingface-h
 ```
 Already pinned this way in `text2city/requirements.txt`.
 
-## What actually happened when I ran this (tfidf embedder)
-
 **Training:** 6,000 examples, 8.4 seconds on CPU — comfortably inside your
 1-2 minute target with a lot of room to spare (even the real
 sentence-transformer version, which only adds a one-time embedding pass,
@@ -95,84 +93,3 @@ does it generalize, not just memorize):
 - `"a flat desert city with almost no water and very few trees"` →
   terrain correctly `flat`, green_amount correctly dropped to 0.035.
 
-## What I found (worth knowing before you present this)
-
-**1. A real bug, now fixed:** `to_generator_kwargs()` was passing the
-model's predicted `water_level` through unconditionally. Since the model
-always outputs *some* number for every continuous parameter (there's no
-"said nothing about this" output), an unmentioned water level near the
-schema default still got applied — and for terrain archetypes with a wide
-low-elevation spread (mountains especially), that flooded up to **32% of
-the map** with water that had nothing to do with the input text. Tested,
-confirmed visually, and fixed: `to_generator_kwargs()` now passes
-`water_level=None` through whenever the prediction is close to its
-schema default, letting `generate_terrain()` apply its own correct
-per-archetype default instead (no water for land-locked archetypes, ~0.2
-for coastal/river ones). Re-ran the same prompt after the fix — water
-dropped from 32% to 0%, confirmed both numerically and visually.
-
-**2. A genuine tfidf limitation (not a bug, an inherent property of this
-embedder):** `"a seaside city..."` predicted terrain = `hills`, not
-`coastal_harbor`. I traced this exactly: the word "seaside" never appears
-anywhere in `generate_dataset.py`'s phrase banks (it got removed earlier
-while fixing a grammar issue), so tfidf — which only knows words it
-literally saw — had zero signal for it. Even words that DO appear can get
-dropped if they're too rare relative to `max_features=400`, since
-TfidfVectorizer keeps only the top-N most frequent terms/bigrams pooled
-together (confirmed "sea" and "coast" also didn't make the cutoff, despite
-appearing in phrase banks). This is precisely the failure mode a real
-sentence-transformer is meant to avoid — it would recognize "seaside" is
-semantically close to "coastal"/"harbor" even having never seen that exact
-word, because it comes pretrained on general English. This is the
-strongest concrete argument for running the real embedder before you
-present this: **run `train.py --embedder sentence-transformer` and
-re-check this exact prompt** — if terrain correctly comes out
-`coastal_harbor`, that's a clean, tell-able story about why the pretrained
-embedding matters.
-
-## Update: fixed a real class-imbalance bug, found a real TF-IDF ceiling
-
-After the previous run, real-world testing surfaced a genuine problem:
-**`city_archetype` and `terrain` both have a schema default that is ALSO
-one of their valid choices** (`monocentric`, `hills`). Since ~65-45% of
-examples don't mention these parameters at all and fall back to that
-default, the default class ends up wildly overrepresented in training —
-confirmed by checking the actual data: `monocentric` was 76% of the
-dataset, `hills` was 52%. Any sentence whose wording only weakly overlaps
-the training vocabulary gets pulled toward that majority-class prior
-instead of the correct answer.
-
-**What I tried, in order, testing each before moving to the next:**
-1. Class-weighted cross-entropy loss (weighting each class inversely to
-   its frequency). Retrained and re-tested on the exact phrases that had
-   failed — this did NOT reliably help, and even flipped one previously-
-   correct case to wrong. Kept it anyway (it is good general practice and
-   doesn't hurt held-out accuracy), but it wasn't the real fix.
-2. Widened the TF-IDF vocabulary (400 → 1200 features) and added more
-   phrase variety to `generate_dataset.py`'s phrase banks (more synonyms
-   for polycentric/linear, and "seaside" phrasing restored for coastal).
-   Retrained and re-tested the same failing phrases — this genuinely
-   worked: `"a city with two separate downtown areas"` now correctly
-   predicts `polycentric` (was `monocentric`), `"a long narrow city"`
-   now correctly predicts `linear`, while `"a small quiet town"` (a
-   genuine default case, no real signal either way) still correctly
-   stays `monocentric` rather than over-correcting.
-
-**What's still a genuine, confirmed ceiling, not a bug**: `"a seaside
-city..."` still predicts `hills`, not `coastal_harbor` — even though
-"seaside" is now literally in the fitted vocabulary. I checked why: it
-only appears in 2 of roughly 50 terrain phrase entries, so its learned
-weight still isn't strong enough to overcome the "hills" majority prior.
-No amount of tfidf tuning fixes this cleanly, because TF-IDF only knows
-"has this exact word appeared, and how often" — it has no notion that
-"seaside" and "coastal" mean the same thing. This is exactly the
-capability a real sentence-transformer adds for free, without needing
-dozens of manually-written synonym phrases for every concept.
-
-## Independent variation (per your Step 1 requirement)
-
-Confirmed in the results above: `cluster_tightness` moved on "tightly
-clustered downtown" while `green_amount` moved on "very few parks" in the
-*same* sentence, independently and correctly — the shared trunk with
-separate heads does let each parameter vary on its own rather than forcing
-them to move together.
