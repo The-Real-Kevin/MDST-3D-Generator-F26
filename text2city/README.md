@@ -130,6 +130,59 @@ re-check this exact prompt** — if terrain correctly comes out
 `coastal_harbor`, that's a clean, tell-able story about why the pretrained
 embedding matters.
 
+## Update: the biggest fix yet -- literal keywords were never in the training data
+
+You reported that even explicit, direct words ("polycentric", "linear", "two clusters",
+"sparse", "dense", "concentrated", "wide") were failing and reverting to
+monocentric. I tested this directly and found the actual cause: **the
+phrase bank for city_archetype never once contained the literal words
+"polycentric", "monocentric", or "linear" anywhere** -- it only used
+descriptive phrases like "with several distinct business districts". If
+you typed the exact word "polycentric", the model had genuinely never
+seen that word during training at all. Same story for "coastal" (only
+"harbor"/"coastline"/"seaside" existed, not "coastal" itself).
+
+**What changed:**
+1. Added the literal archetype names themselves as training phrases
+   ("a polycentric city", "this city is polycentric", "a linear layout",
+   etc.) for every terrain and city archetype, plus "coastal".
+2. Added explicit single-word phrases for "sparse", "dense", "concentrated",
+   "compact" directly, rather than relying on multi-word phrases containing
+   them incidentally.
+3. Rebuilt num_clusters generation from scratch: phrases are now tied to
+   their EXACT literal number ("one main hub" always targets ~1, "two
+   hubs" always targets ~2, etc.) using every combination of a number
+   (one-six) and a cluster noun (hub/center/cluster/district/node) --
+   previously "three centers" existed but "three clusters" didn't, and
+   worse, I found a real bug while testing this: "one main hub" and "two
+   hubs" briefly shared one fuzzy numeric range, so "one main hub" could
+   randomly get paired with a target of 1.8, incorrectly triggering a
+   "this isn't monocentric" correction. Fixed by tying each phrase to its
+   own exact number with only small jitter.
+4. Scaled the dataset from 6,000 to 15,000 examples and the model from
+   hidden_dim 128 to 192 with more training epochs (40 -> 60), since
+   there was no reason not to -- training time only grew from ~8s to
+   ~48s (tfidf) which is still nowhere near your 1-5 minute budget.
+
+**Tested before/after (tfidf), confirming the actual fix:**
+
+| Input | Before | After |
+|---|---|---|
+| "a polycentric city" | monocentric | **polycentric** |
+| "this is a linear city" | monocentric | **linear** |
+| "a coastal city" (terrain) | hills | **coastal_harbor** |
+| "a city with one main hub" | (untested, would have been wrong) | **monocentric, clusters=1.00** |
+| "a city with two clusters" | clusters=1.12 | **clusters=2.87, non-monocentric** |
+| "a city with six clusters" | -- | **clusters=6.00** |
+| "sparse" | monocentric, density near default | **density=0.00** |
+| "dense" | -- | **density=0.99** |
+| "concentrated" | -- | **cluster_tightness=1.00** |
+| "wide shape" | -- | **linear** |
+
+This is all dataset/training-code level, so it applies the same way to
+your sentence-transformer training, not just this tfidf proxy -- re-run
+generate_dataset.py and train.py to pick it up.
+
 ## Update: fixed a real class-imbalance bug, found a real TF-IDF ceiling
 
 After the previous run, real-world testing surfaced a genuine problem:

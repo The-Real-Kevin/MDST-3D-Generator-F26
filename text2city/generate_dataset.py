@@ -53,36 +53,54 @@ TERRAIN_PHRASES = {
     "hills": ["set in rolling hills", "spread across gentle hills", "on hilly terrain"],
     "mountains": ["surrounded by mountains", "nestled in rugged mountains", "high in the mountains"],
     "valley": ["nestled in a deep valley", "tucked into a valley", "set in a river valley"],
-    "coastal_harbor": ["built around a harbor", "hugging the coastline", "by the sea", "on the coast", "a seaside setting", "along the seaside"],
-    "peninsula": ["built on a peninsula", "surrounded by water on three sides", "on a narrow peninsula"],
-    "river": ["split by a winding river", "built along a river", "with a river cutting through it"],
+    "coastal_harbor": ["built around a harbor", "hugging the coastline", "by the sea", "on the coast", "a seaside setting", "along the seaside", "a coastal city", "a coastal setting", "coastal terrain"],
+    "peninsula": ["built on a peninsula", "surrounded by water on three sides", "on a narrow peninsula", "a peninsula city", "peninsula terrain"],
+    "river": ["split by a winding river", "built along a river", "with a river cutting through it", "a river city", "river terrain"],
 }
 
 CITY_ARCHETYPE_PHRASES = {
-    "monocentric": ["with a single downtown core", "built around one central business district", "with one clear city center"],
-    "polycentric": ["with several distinct business districts", "made up of multiple downtown clusters", "with scattered urban centers", "with multiple business hubs", "with two separate downtown areas", "made up of several separate city centers"],
-    "linear": ["stretched out in a long corridor", "elongated along a single axis", "laid out in a line", "long and narrow", "thin and elongated in shape"],
+    "monocentric": ["with a single downtown core", "built around one central business district", "with one clear city center", "a monocentric city", "a monocentric layout", "this city is monocentric"],
+    "polycentric": ["with several distinct business districts", "made up of multiple downtown clusters", "with scattered urban centers", "with multiple business hubs", "with two separate downtown areas", "made up of several separate city centers", "a polycentric city", "a polycentric layout", "this city is polycentric"],
+    "linear": ["stretched out in a long corridor", "elongated along a single axis", "laid out in a line", "long and narrow", "thin and elongated in shape", "a linear city", "a linear layout", "this city is linear", "a wide, elongated shape", "a wide and stretched out shape"],
 }
 
-# (low, high) numeric range, [phrases]
-NUM_CLUSTERS_LEVELS = [
-    ((1, 2), ["with just one or two hubs", "with a couple of centers", "with two centers", "with one main hub"]),
-    ((3, 4), ["with a handful of clusters", "with several separate hubs", "with three centers", "with four hubs", "with three separate districts"]),
-    ((5, 6), ["with many scattered clusters", "with a large number of distinct hubs", "with five centers", "with six hubs", "with five separate districts"]),
-]
+# Exact-count phrases, each mapped to its own literal number (not a shared
+# fuzzy range) -- this matters because a phrase like "one main hub" must
+# never get randomly paired with a target of 1.8 just because it happened
+# to share a bucket with "two hubs"; the sampled value has to match what
+# the phrase actually says.
+_CLUSTER_NOUNS = ["hub", "center", "cluster", "district", "node"]
+_NUMBER_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
+
+
+def _cluster_noun_phrases(count: int) -> list[str]:
+    word = _NUMBER_WORDS[count]
+    plural = "" if count == 1 else "s"
+    noun_prefix = "main " if count == 1 else ""
+    return [f"with {word} {noun_prefix}{noun}{plural}" for noun in _CLUSTER_NOUNS]
+
+
+NUM_CLUSTERS_EXACT = {
+    1: _cluster_noun_phrases(1) + ["with just one main hub", "with a single center"],
+    2: _cluster_noun_phrases(2) + ["with a couple of centers", "with just one or two hubs"],
+    3: _cluster_noun_phrases(3) + ["with a handful of clusters", "with several separate hubs"],
+    4: _cluster_noun_phrases(4) + ["with several separate districts"],
+    5: _cluster_noun_phrases(5) + ["with many scattered clusters"],
+    6: _cluster_noun_phrases(6) + ["with a large number of distinct hubs"],
+}
 
 DENSITY_LEVELS = [
-    ((0.0, 0.15), ["barely built up", "almost entirely empty", "sparsely inhabited"]),
+    ((0.0, 0.15), ["barely built up", "almost entirely empty", "sparsely inhabited", "sparse", "very sparse"]),
     ((0.15, 0.35), ["lightly built up", "fairly sparse", "not very built up"]),
     ((0.35, 0.6), ["moderately built up", "with medium density", "reasonably built up"]),
-    ((0.6, 0.8), ["densely populated", "densely built", "quite crowded with buildings"]),
-    ((0.8, 1.0), ["extremely dense", "packed with buildings", "ultra-dense and crowded"]),
+    ((0.6, 0.8), ["densely populated", "densely built", "quite crowded with buildings", "dense"]),
+    ((0.8, 1.0), ["extremely dense", "packed with buildings", "ultra-dense and crowded", "very dense", "highly concentrated"]),
 ]
 
 CLUSTER_TIGHTNESS_LEVELS = [
-    ((0.0, 0.3), ["with buildings spread loosely across the city", "with a sprawling, spread-out layout"]),
+    ((0.0, 0.3), ["with buildings spread loosely across the city", "with a sprawling, spread-out layout", "spread out", "sparse layout"]),
     ((0.3, 0.6), ["with a moderately clustered downtown", "with buildings loosely grouped together"]),
-    ((0.6, 1.0), ["with a tightly clustered downtown core", "with a compact, concentrated skyline"]),
+    ((0.6, 1.0), ["with a tightly clustered downtown core", "with a compact, concentrated skyline", "concentrated", "compact", "tightly clustered"]),
 ]
 
 RELIEF_LEVELS = [
@@ -149,10 +167,13 @@ def generate_example(rng: random.Random) -> dict:
 
     num_clusters_mentioned = rng.random() <= num_clusters_spec.mention_prob
     if num_clusters_mentioned:
-        value, phrase = _sample_continuous(rng, "num_clusters", NUM_CLUSTERS_LEVELS)
-        params["num_clusters"] = value
+        count = rng.choice(list(NUM_CLUSTERS_EXACT.keys()))
+        phrase = rng.choice(NUM_CLUSTERS_EXACT[count])
+        # small jitter for continuous variety while staying close to the
+        # literal number the phrase actually states
+        params["num_clusters"] = max(1.0, min(6.0, count + rng.uniform(-0.25, 0.25)))
         mentioned_phrases.append(phrase)
-    implies_non_monocentric = num_clusters_mentioned and params["num_clusters"] > 2.0
+    implies_non_monocentric = num_clusters_mentioned and params["num_clusters"] > 1.5
 
     if rng.random() <= city_archetype_spec.mention_prob:
         choices = [c for c in city_archetype_spec.choices if c != "monocentric"] if implies_non_monocentric else city_archetype_spec.choices
@@ -234,7 +255,7 @@ def generate_dataset(n: int, seed: int = 0) -> list:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--n", type=int, default=6000, help="number of examples to generate")
+    parser.add_argument("--n", type=int, default=15000, help="number of examples to generate")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=str, default="data/text2city_dataset.csv")
     parser.add_argument("--format", choices=["csv", "json"], default="csv")
