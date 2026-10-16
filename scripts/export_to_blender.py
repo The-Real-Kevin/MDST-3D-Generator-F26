@@ -1,15 +1,14 @@
 """
-Import a saved CityGrid into Blender and build 3D geometry from it.
-
-Must be run with Blender's own Python, not your venv:
+Import a saved CityGrid into Blender, build 3D geometry, and export a
+watertight STL suitable for 3D printing.
 
     blender --background --python scripts/export_to_blender.py -- data/city.npz
 
 Drop --background to have the GUI open with the result already loaded.
 
-Builds a "Terrain" mesh coloured by land use, and a "Buildings" mesh of one
-box per building cell coloured by height tier, then saves a .blend next to
-the input .npz.
+Outputs, next to the input .npz:
+    <name>.blend   the Blender scene (terrain + buildings, coloured)
+    <name>.stl     a printable mesh
 
 NOTE: numpy only. Blender does not bundle scipy, so importing it here would
 fail with ModuleNotFoundError.
@@ -21,7 +20,6 @@ import bpy
 import bmesh
 import numpy as np
 
-# Blender passes its own args first, then "--", then ours.
 argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
 if not argv:
     raise SystemExit("usage: blender --background --python export_to_blender.py -- <city.npz>")
@@ -32,10 +30,14 @@ CELL_SIZE = 1.0             # world size of one grid cell
 HEIGHT_SCALE = 8.0          # terrain_height is 0-1, so scale it up to be visible
 BUILDING_HEIGHT_SCALE = 1.0
 
+# --- printability knobs -------------------------------------------------
+BASE_THICKNESS = 2.0        # solid slab under the lowest point of the terrain
+BUILDING_EMBED = 0.3        # how far each building sinks into the ground
+# -----------------------------------------------------------------------
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from citygen import CityGrid, LAND_BUILDING, LAND_GREEN, LAND_ROAD  # noqa: E402
 
-# name -> (R, G, B), each 0-1. Edit these to change the palette.
 COLORS = {
     "ground":          (0.78, 0.72, 0.55),
     "green":           (0.30, 0.55, 0.25),
@@ -47,12 +49,7 @@ COLORS = {
 }
 
 
-# --------------------------------------------------------------------
-# helpers
-# --------------------------------------------------------------------
-
 def get_or_create_material(name: str):
-    """Fetch a material by name, creating it from COLORS if it doesn't exist."""
     mat = bpy.data.materials.get(name)
     if mat is not None:
         return mat
@@ -62,51 +59,48 @@ def get_or_create_material(name: str):
     r, g, b = COLORS[name]
     if bsdf is not None:
         bsdf.inputs["Base Color"].default_value = (r, g, b, 1.0)
-    mat.diffuse_color = (r, g, b, 1.0)   # also used by solid viewport shading
+    mat.diffuse_color = (r, g, b, 1.0)
     return mat
 
 
 def clear_scene():
-    """Delete everything, so re-running doesn't stack cities on top of each other."""
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)
 
 
 # --------------------------------------------------------------------
-# terrain mesh
+# terrain -- a closed SOLID, not an open sheet
 # --------------------------------------------------------------------
 
 def build_terrain(city: CityGrid):
-    """One vertex per grid cell, joined into quads, coloured by land use."""
+    """
+    Top surface + vertical skirt around the perimeter + flat bottom cap.
+
+    The original version built only the top surface: a zero-thickness sheet
+    with an open boundary all the way around, which no slicer can print.
+    The skirt and cap turn it into a closed volume.
+    """
     size = city.size
     mesh = bpy.data.meshes.new("TerrainMesh")
     bm = bmesh.new()
-
-    # material slots, in a fixed order -- face.material_index is an index
-    # into THIS list, so the order here is what the indices below mean
     slot_names = ["ground", "water", "green", "road"]
 
+    # top surface vertices, created once and shared by every face that
+    # touches them
     verts = np.empty((size, size), dtype=object)
+    zmin = float("inf")
     for y in range(size):
         for x in range(size):
-            # SOLUTION 1: water sits flat at exactly 0.0 so lakes are level;
-            # land is the 0-1 heightmap scaled up to world units.
-            if city.is_water[y, x]:
-                z = 0.0
-            else:
-                z = float(city.terrain_height[y, x]) * HEIGHT_SCALE
-
+            z = 0.0 if city.is_water[y, x] else float(city.terrain_height[y, x]) * HEIGHT_SCALE
+            zmin = min(zmin, z)
             verts[y, x] = bm.verts.new((x * CELL_SIZE, y * CELL_SIZE, z))
+
+    base_z = zmin - BASE_THICKNESS
 
     for y in range(size - 1):
         for x in range(size - 1):
-            # SOLUTION 2: vertices listed going AROUND the quad. Swapping the
-            # last two would cross the diagonal and make a bow-tie face.
             face = bm.faces.new((verts[y, x], verts[y, x + 1],
                                  verts[y + 1, x + 1], verts[y + 1, x]))
-
-            # SOLUTION 3: material_index is a position in slot_names.
-            # Water wins over everything, then green, then road, else ground.
             if city.is_water[y, x]:
                 face.material_index = slot_names.index("water")
             elif city.land_use[y, x] == LAND_GREEN:
@@ -115,6 +109,37 @@ def build_terrain(city: CityGrid):
                 face.material_index = slot_names.index("road")
             else:
                 face.material_index = slot_names.index("ground")
+
+    # walk the boundary once, in order, without repeating the corners
+    perimeter = []
+    for x in range(size):
+        perimeter.append((0, x))
+    for y in range(1, size):
+        perimeter.append((y, size - 1))
+    for x in range(size - 2, -1, -1):
+        perimeter.append((size - 1, x))
+    for y in range(size - 2, 0, -1):
+        perimeter.append((y, 0))
+
+    # one bottom vertex per perimeter position, created ONCE and reused by
+    # both the skirt and the cap. Creating them twice would leave the mesh
+    # looking closed while actually being split along that seam -- the
+    # classic silent watertightness bug.
+    bottom_verts = [bm.verts.new((x * CELL_SIZE, y * CELL_SIZE, base_z))
+                    for (y, x) in perimeter]
+
+    n = len(perimeter)
+    for i in range(n):
+        j = (i + 1) % n
+        ty, tx = perimeter[i]
+        uy, ux = perimeter[j]
+        f = bm.faces.new((verts[ty, tx], verts[uy, ux],
+                          bottom_verts[j], bottom_verts[i]))
+        f.material_index = slot_names.index("ground")
+
+    # single n-gon across the whole base
+    cap = bm.faces.new(tuple(reversed(bottom_verts)))
+    cap.material_index = slot_names.index("ground")
 
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
     bm.to_mesh(mesh)
@@ -129,19 +154,15 @@ def build_terrain(city: CityGrid):
 
 
 # --------------------------------------------------------------------
-# buildings mesh
+# buildings -- closed boxes, sunk into the terrain
 # --------------------------------------------------------------------
 
 def build_buildings(city: CityGrid):
-    """One box per building cell, all merged into a single mesh object."""
+    size = city.size
     mesh = bpy.data.meshes.new("BuildingsMesh")
     bm = bmesh.new()
-
     slot_names = ["building_short", "building_mid", "building_tall"]
 
-    # Height tiers from THIS city's own distribution, so the colouring
-    # adapts instead of using fixed cutoffs that would look wrong on a very
-    # short or very tall city.
     building_cells = np.argwhere(city.land_use == LAND_BUILDING)
     heights = city.building_height[city.land_use == LAND_BUILDING]
     heights = heights[heights > 0]
@@ -151,15 +172,24 @@ def build_buildings(city: CityGrid):
         low_cut, high_cut = 0.0, 0.0
 
     for y, x in building_cells:
-        base_z = float(city.terrain_height[y, x]) * HEIGHT_SCALE
         h = float(city.building_height[y, x]) * BUILDING_HEIGHT_SCALE
         if h <= 0:
             continue
 
-        cx, cy = x * CELL_SIZE, y * CELL_SIZE
-        half = CELL_SIZE * 0.4   # < 0.5 leaves a gap so neighbours don't fuse
+        # Start from the LOWEST of the four terrain corners around this cell,
+        # then sink a little further. Using terrain_height[y, x] alone (the
+        # original behaviour) leaves boxes hovering on sloped ground, which
+        # prints as a floating block or a hairline crack at the base.
+        y1 = min(y + 1, size - 1)
+        x1 = min(x + 1, size - 1)
+        corner_min = min(float(city.terrain_height[y, x]), float(city.terrain_height[y, x1]),
+                         float(city.terrain_height[y1, x]), float(city.terrain_height[y1, x1]))
+        base_z = corner_min * HEIGHT_SCALE - BUILDING_EMBED
+        top_z = float(city.terrain_height[y, x]) * HEIGHT_SCALE + h
 
-        # SOLUTION 4: bottom 40% short, next 35% mid, top 25% tall.
+        cx, cy = x * CELL_SIZE, y * CELL_SIZE
+        half = CELL_SIZE * 0.4
+
         if h < low_cut:
             mat_idx = slot_names.index("building_short")
         elif h < high_cut:
@@ -173,22 +203,16 @@ def build_buildings(city: CityGrid):
             bm.verts.new((cx + half, cy + half, base_z)),
             bm.verts.new((cx - half, cy + half, base_z)),
         ]
-        # SOLUTION 5: same four corners, same order, lifted by h. The side-wall
-        # loop below pairs bottom[i] with top[i], so the order must match.
         top = [
-            bm.verts.new((cx - half, cy - half, base_z + h)),
-            bm.verts.new((cx + half, cy - half, base_z + h)),
-            bm.verts.new((cx + half, cy + half, base_z + h)),
-            bm.verts.new((cx - half, cy + half, base_z + h)),
+            bm.verts.new((cx - half, cy - half, top_z)),
+            bm.verts.new((cx + half, cy - half, top_z)),
+            bm.verts.new((cx + half, cy + half, top_z)),
+            bm.verts.new((cx - half, cy + half, top_z)),
         ]
-
-        # close the box. top[::-1] reverses the roof's winding order so its
-        # normal points up instead of down.
         new_faces = [bm.faces.new(bottom), bm.faces.new(top[::-1])]
         for i in range(4):
             j = (i + 1) % 4
             new_faces.append(bm.faces.new((bottom[i], bottom[j], top[j], top[i])))
-
         for face in new_faces:
             face.material_index = mat_idx
 
@@ -205,8 +229,45 @@ def build_buildings(city: CityGrid):
 
 
 # --------------------------------------------------------------------
-# main
+# STL export
 # --------------------------------------------------------------------
+
+def export_stl(path, verbose=False):
+    """
+    Blender renamed the STL exporter between versions:
+        Blender  < 4.2   bpy.ops.export_mesh.stl
+        Blender >= 4.2   bpy.ops.wm.stl_export
+
+    Both names resolve as attributes whether or not the operator actually
+    exists -- bpy.ops hands back a stub that only raises when called -- so
+    the only way to tell is to try one. We therefore attempt each in turn
+    and stay QUIET about the ones that aren't there: a fallback working as
+    designed is not an error, and printing "failed" for it just alarms
+    people. Only a total failure gets reported.
+
+    Set verbose=True if you want to see which operator actually ran.
+    """
+    path = str(Path(path).resolve())   # operators reject relative paths
+    attempts = []
+
+    for label, op in (("wm.stl_export", getattr(bpy.ops.wm, "stl_export", None)),
+                      ("export_mesh.stl", getattr(getattr(bpy.ops, "export_mesh", None), "stl", None))):
+        if op is None:
+            attempts.append(f"{label}: not available")
+            continue
+        try:
+            op(filepath=path)
+            print(f"exported STL -> {path}")
+            if verbose:
+                print(f"  (used bpy.ops.{label})")
+            return True
+        except Exception as exc:
+            attempts.append(f"{label}: {type(exc).__name__}")
+
+    print("STL export failed. Tried -- " + "; ".join(attempts))
+    print("Export manually in Blender: File > Export > Stl (.stl)")
+    return False
+
 
 def main():
     city = CityGrid.load(CITY_PATH)
@@ -217,10 +278,11 @@ def main():
     build_terrain(city)
     build_buildings(city)
 
-    # .resolve() matters: save_as_mainfile rejects relative paths
-    out_path = str(Path(CITY_PATH).with_suffix(".blend").resolve())
-    bpy.ops.wm.save_as_mainfile(filepath=out_path)
-    print(f"saved {out_path}")
+    out_blend = str(Path(CITY_PATH).with_suffix(".blend").resolve())
+    bpy.ops.wm.save_as_mainfile(filepath=out_blend)
+    print(f"saved {out_blend}")
+
+    export_stl(Path(CITY_PATH).with_suffix(".stl"))
 
 
 if __name__ == "__main__":
