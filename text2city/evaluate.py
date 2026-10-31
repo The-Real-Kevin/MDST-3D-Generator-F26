@@ -1,23 +1,16 @@
 #!/usr/bin/env python3
 """
-Step 5: evaluate a trained checkpoint.
+Evaluate a trained checkpoint, two ways -- deliberately kept separate:
 
-Two things this checks, deliberately kept separate:
-  1. Held-out synthetic examples (same templates/phrase banks as training,
-     just examples the model didn't train on) -- tells you if the model
-     learned the mapping at all.
-  2. Hand-written sentences that NO template in generate_dataset.py could
-     have produced -- tells you if it generalizes to real phrasing, which
-     is what actually matters once a real person is typing into this.
-     This is the more important number. A model that aces (1) but fails
-     (2) has memorized the templates, not learned the task -- and this is
-     exactly where the tfidf embedder is expected to struggle (it only
-     "knows" words it saw while fitting) versus a real sentence-transformer
-     (which should handle a paraphrase like "surrounded by peaks" even
-     though only "surrounded by mountains" was in the training data).
+  1. Held-out synthetic sentences: same phrase banks as training, but
+     examples the model never trained on. Tells you if it learned the
+     mapping at all.
+  2. Hand-written sentences no template could have produced: tells you if
+     it generalises to how a person actually types. This is the number
+     that matters. A model that aces (1) and fails (2) memorised the
+     templates instead of learning the task.
 
-Usage:
-    python text2city/evaluate.py --checkpoint text2city/checkpoint
+    python text2city/evaluate.py
 """
 import argparse
 import sys
@@ -27,44 +20,59 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from text2city.schema import PARAM_SCHEMA
-from text2city.dataset import load_rows, build_targets, train_val_split
-from text2city.embedders import load_embedder
-from text2city.model import TextToCityParams, decode_batch
-from text2city.freshness import check_staleness
+from text2city.schema import PARAM_SCHEMA, PARAM_BY_NAME  # noqa: E402
+from text2city.dataset import load_rows, build_targets, train_val_split  # noqa: E402
+from text2city.embedders import load_embedder, embedder_filename  # noqa: E402
+from text2city.model import TextToCityParams, decode_batch  # noqa: E402
+from text2city.freshness import check_staleness  # noqa: E402
 
 
-# Hand-written sentences -- deliberately phrased differently from every
-# template/phrase-bank entry in generate_dataset.py, to test generalization
-# rather than memorization. Expected values are approximate (this is a
-# qualitative check, not a strict pass/fail).
+# Hand-written sentences, each with what a person would EXPECT the model to
+# get right. Only list the parameters the sentence actually talks about.
+#   categorical -> the exact choice, e.g. "polycentric"
+#   continuous  -> "high" or "low" (relative to that parameter's range),
+#                  or an int for num_clusters (within 0.75 counts)
+#   binary      -> True / False
 HANDWRITTEN_EXAMPLES = [
-    "a huge sprawling metropolis packed with skyscrapers",
-    "a quiet little town in the mountains with hardly any buildings",
-    "a city built along a big river, with lots of parks on both banks",
-    "an ultra futuristic city with several separate business hubs",
-    "a small fishing village by the coast",
-    "a flat desert city with almost no water and very few trees",
+    ("a huge sprawling metropolis packed with skyscrapers", {"density": "high"}),
+    ("a quiet little town on flat land with hardly any buildings", {"terrain": "flat", "density": "low"}),
+    ("a city in the hills with lots of parks everywhere", {"terrain": "hills", "green_amount": "high"}),
+    ("a city with three separate business hubs", {"city_archetype": "polycentric", "num_clusters": 3}),
+    ("a long thin city stretched along one road", {"city_archetype": "linear"}),
+    ("a sparse town with almost no roads", {"density": "low", "road_continuity": "low"}),
+    ("an extremely dense city with five districts", {"density": "high", "num_clusters": 5}),
+    ("a city on level ground that nature has taken over", {"terrain": "flat", "green_override": True}),
+    ("a well connected grid of streets around a single downtown",
+     {"road_continuity": "high", "city_archetype": "monocentric"}),
 ]
 
 
-def load_checkpoint(checkpoint_dir: str, dataset_path: str = "data/text2city_dataset.csv"):
+def expectation_met(spec, predicted, expected) -> bool:
+    if spec.kind in ("categorical", "binary"):
+        return predicted == expected
+    low, high = spec.value_range
+    if expected == "high":
+        return predicted > low + 0.6 * (high - low)
+    if expected == "low":
+        return predicted < low + 0.4 * (high - low)
+    return abs(predicted - float(expected)) <= 0.75
+
+
+def load_checkpoint(checkpoint_dir: str, dataset_path: str):
     ckpt_dir = Path(checkpoint_dir)
     ckpt = torch.load(ckpt_dir / "model.pt", map_location="cpu", weights_only=False)
     check_staleness(ckpt.get("fingerprint"), dataset_path)
     model = TextToCityParams(embedding_dim=ckpt["embedding_dim"], hidden_dim=ckpt["hidden_dim"])
     model.load_state_dict(ckpt["model_state"])
     model.eval()
-
-    embedder_ext = "pkl" if ckpt["embedder_kind"] == "tfidf" else "txt"
-    embedder = load_embedder(ckpt["embedder_kind"], str(ckpt_dir / f"embedder.{embedder_ext}"))
+    kind = ckpt["embedder_kind"]
+    embedder = load_embedder(kind, str(ckpt_dir / embedder_filename(kind)))
     return model, embedder
 
 
 def predict(model, embedder, texts: list[str]) -> list[dict]:
-    embeddings = torch.tensor(embedder.encode(texts))
     with torch.no_grad():
-        raw = model(embeddings)
+        raw = model(torch.as_tensor(embedder.encode(texts)))
     return [decode_batch(raw, i) for i in range(len(texts))]
 
 
@@ -78,38 +86,47 @@ def main():
 
     model, embedder = load_checkpoint(args.checkpoint, args.dataset)
 
-    # --- 1. held-out synthetic examples ---
+    # ---- 1. held-out synthetic examples ----
     rows = load_rows(args.dataset)
-    texts = [r["text"] for r in rows]
     targets = build_targets(rows)
     _, val_idx = train_val_split(len(rows), args.val_fraction, seed=args.seed)
-
-    val_texts = [texts[i] for i in val_idx]
-    predictions = predict(model, embedder, val_texts)
+    preds = predict(model, embedder, [rows[i]["text"] for i in val_idx])
 
     print("=== 1. held-out synthetic examples ===")
     for spec in PARAM_SCHEMA:
-        if spec.kind == "categorical":
-            correct = sum(1 for i, p in zip(val_idx, predictions) if p[spec.name] == rows[i][spec.name])
-            print(f"  {spec.name:20s} accuracy = {correct/len(val_idx):.3f}")
-        elif spec.kind == "binary":
-            correct = sum(1 for i, p in zip(val_idx, predictions) if str(p[spec.name]) == rows[i][spec.name])
-            print(f"  {spec.name:20s} accuracy = {correct/len(val_idx):.3f}")
+        if spec.kind in ("categorical", "binary"):
+            # fraction of validation rows where the prediction matches the label
+            # (the CSV stores everything as text, so compare as strings)
+            accuracy = np.mean([str(p[spec.name]) == rows[i][spec.name] for i, p in zip(val_idx, preds)])
+            print(f"  {spec.name:20s} accuracy = {accuracy:.3f}")
         else:
-            preds = np.array([p[spec.name] for p in predictions])
+            # mean absolute error in the parameter's real units
+            predicted = np.array([p[spec.name] for p in preds])
             actual = targets[f"{spec.name}__raw"][val_idx]
-            print(f"  {spec.name:20s} MAE = {np.mean(np.abs(preds - actual)):.4f}")
+            mae = np.mean(np.abs(predicted - actual))
+            print(f"  {spec.name:20s} MAE      = {mae:.4f}")
 
-    # --- 2. hand-written, never-templated sentences (qualitative) ---
-    print("\n=== 2. hand-written sentences (not from any template -- generalization check) ===")
-    hw_predictions = predict(model, embedder, HANDWRITTEN_EXAMPLES)
-    for text, pred in zip(HANDWRITTEN_EXAMPLES, hw_predictions):
-        print(f"\n  \"{text}\"")
-        for spec in PARAM_SCHEMA:
-            val = pred[spec.name]
-            if isinstance(val, float):
-                val = round(val, 3)
-            print(f"      {spec.name:20s} = {val}")
+    # ---- 2. hand-written sentences ----
+    print("\n=== 2. hand-written sentences (the generalisation test) ===")
+    hw_preds = predict(model, embedder, [text for text, _ in HANDWRITTEN_EXAMPLES])
+    hits = total = 0
+    for (text, expected), pred in zip(HANDWRITTEN_EXAMPLES, hw_preds):
+        print(f'\n  "{text}"')
+        for name, want in expected.items():
+            if name not in PARAM_BY_NAME:
+                print(f"      {name:20s} (not a parameter -- check the spelling)")
+                continue
+            if name == "terrain" and want not in PARAM_BY_NAME["terrain"].choices:
+                print(f"      {name:20s} skipped: your citygen has no {want!r} terrain")
+                continue
+            got = pred[name]
+            ok = expectation_met(PARAM_BY_NAME[name], got, want)
+            hits += ok
+            total += 1
+            shown = round(got, 2) if isinstance(got, float) else got
+            print(f"      {'PASS' if ok else 'MISS'}  {name:20s} wanted {want!r:14} got {shown!r}")
+    if total:
+        print(f"\nhand-written expectations met: {hits}/{total} ({hits / total:.0%})")
 
 
 if __name__ == "__main__":

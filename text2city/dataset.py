@@ -1,8 +1,10 @@
 """
-Loads the synthetic (sentence -> parameters) CSV and converts it into the
-tensors the training loop needs: class indices for categorical parameters,
-[0,1]-normalized floats for continuous parameters (matching the sigmoid
-scaling model.decode_outputs expects), and 0/1 floats for binary parameters.
+Loads the synthetic (sentence -> parameters) CSV and turns it into the
+arrays the training loop needs:
+
+    categorical -> int64 class index   (which choice, as a number)
+    continuous  -> float32 in [0, 1]   (rescaled, to match the model's sigmoid output)
+    binary      -> float32 0.0 or 1.0
 """
 from __future__ import annotations
 
@@ -13,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from text2city.schema import PARAM_SCHEMA, PARAM_BY_NAME  # noqa: E402
+from text2city.schema import PARAM_SCHEMA  # noqa: E402
 
 
 def load_rows(csv_path: str) -> list[dict]:
@@ -23,13 +25,13 @@ def load_rows(csv_path: str) -> list[dict]:
 
 def build_targets(rows: list[dict]) -> dict:
     """
-    Returns {param_name: np.ndarray}, one array per parameter:
-        categorical -> int64 class indices, shape (N,)
-        continuous  -> float32 in [0,1] (normalized), shape (N,)
-        binary      -> float32 0.0/1.0, shape (N,)
-    Also returns the raw (unnormalized) continuous values under
-    "<name>__raw" keys, handy for reporting human-readable metrics
-    (e.g. density MAE in actual 0-1 generator units, not normalized units).
+    Returns {param_name: np.ndarray of shape (N,)}, one array per parameter.
+
+    For continuous parameters it ALSO returns the original, un-rescaled
+    values under "<name>__raw" -- handy for reporting errors in real units
+    (density off by 0.04) rather than rescaled ones.
+
+    Everything in the CSV is a string, so convert as you go.
     """
     targets = {}
     for spec in PARAM_SCHEMA:
@@ -47,7 +49,8 @@ def build_targets(rows: list[dict]) -> dict:
 
 
 def train_val_split(n: int, val_fraction: float = 0.15, seed: int = 0):
+    """Shuffle 0..n-1 and cut off the last val_fraction for validation. Returns (train_idx, val_idx)."""
     rng = np.random.default_rng(seed)
     idx = rng.permutation(n)
     n_val = int(n * val_fraction)
-    return idx[n_val:], idx[:n_val]  # train_idx, val_idx
+    return idx[n_val:], idx[:n_val]

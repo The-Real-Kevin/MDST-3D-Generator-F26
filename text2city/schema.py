@@ -1,26 +1,44 @@
 """
 Single source of truth for the 10 city-generator parameters the
-text-to-parameter model will predict.
+text-to-parameter model predicts.
 
-Every other piece (dataset generation, model architecture, and eventually
-the inference script that calls generate_city.py) imports PARAM_SCHEMA
-from here instead of hardcoding parameter names/ranges. If the underlying
-city generator's parameters ever change, this is the one file to update.
+Every other piece (dataset generation, model, training, evaluation, and the
+inference script in a later week) imports PARAM_SCHEMA from here instead of
+hardcoding parameter names or ranges. If the generator's parameters ever
+change, this is the one file to update.
 
 Each parameter is one of three kinds:
     categorical -- a fixed set of named choices (e.g. terrain archetype)
     continuous  -- a float in [low, high]
     binary      -- True/False
 
-`default` is what the model should learn to predict when a parameter is
-NOT mentioned in the input text at all (see generate_dataset.py) --
-this is what keeps the model's behavior predictable on short, partial
-prompts instead of guessing wildly for anything the user didn't specify.
+`default` is what the model should predict when a parameter is NOT
+mentioned in the text at all (see generate_dataset.py). That keeps the
+model predictable on short, partial prompts instead of guessing wildly
+for anything the user didn't specify.
+
+Terrain choices come from YOUR citygen package, not a fixed list: if your
+terrain.py only implements flat and hills, the model only ever learns to
+predict flat and hills -- so it can never hand the generator a terrain
+type your code doesn't have.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import sys
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+try:
+    from citygen import TERRAIN_ARCHETYPES, CITY_ARCHETYPES  # noqa: E402
+except ImportError as exc:
+    raise ImportError(
+        "text2city needs your citygen package (terrain.py and buildings.py) to "
+        "import cleanly, because the model learns exactly the terrain and city "
+        f"types you implemented. Original error: {exc}"
+    ) from exc
 
 
 @dataclass
@@ -28,23 +46,27 @@ class ParamSpec:
     name: str
     kind: str  # "categorical" | "continuous" | "binary"
     default: object
-    choices: Optional[list] = None      # required for "categorical"
+    choices: Optional[list] = None       # required for "categorical"
     value_range: Optional[tuple] = None  # required for "continuous", (low, high)
-    # how often a synthetic training sentence should mention this parameter
-    # at all -- tuned to roughly reflect how often a real person would
-    # actually describe this aspect of a city in casual text
+    # how often a synthetic training sentence mentions this parameter at all
     mention_prob: float = 0.35
+
+
+_TERRAINS = list(TERRAIN_ARCHETYPES)
+_TERRAIN_DEFAULT = "hills" if "hills" in _TERRAINS else _TERRAINS[0]
+_CITIES = list(CITY_ARCHETYPES)
+_CITY_DEFAULT = "monocentric" if "monocentric" in _CITIES else _CITIES[0]
 
 
 PARAM_SCHEMA: list[ParamSpec] = [
     ParamSpec(
-        name="terrain", kind="categorical", default="hills",
-        choices=["flat", "hills", "mountains", "valley", "coastal_harbor", "peninsula", "river"],
+        name="terrain", kind="categorical", default=_TERRAIN_DEFAULT,
+        choices=_TERRAINS,
         mention_prob=0.8,
     ),
     ParamSpec(
-        name="city_archetype", kind="categorical", default="monocentric",
-        choices=["monocentric", "polycentric", "linear"],
+        name="city_archetype", kind="categorical", default=_CITY_DEFAULT,
+        choices=_CITIES,
         mention_prob=0.65,
     ),
     ParamSpec(
@@ -103,23 +125,16 @@ def default_vector() -> dict:
 
 def to_generator_kwargs(params: dict) -> dict:
     """
-    Map this schema's parameter names to generate_city.py's build_city()
-    keyword arguments. Kept in one place so a naming mismatch is a single
-    fix, not a hunt through the inference script later.
+    Map this schema's parameter names onto generate_city.py's build_city()
+    keyword arguments.
 
     water_level needs special handling: the model always predicts SOME
-    numeric value for it (it's a continuous head, there's no "didn't say
-    anything" output), but generate_terrain()'s own per-archetype default
-    is genuinely terrain-dependent -- land-locked archetypes (mountains,
-    hills, flat, valley) default to no water at all, while water-capable
-    ones (coastal_harbor, peninsula, river) default to ~0.2. A single
-    fixed schema default for water_level can't represent that, so if the
-    predicted value is close to the schema default (meaning the text
-    likely said nothing specific about water), we pass water_level=None
-    through instead and let generate_terrain() apply the correct
-    archetype-specific default -- otherwise a "mountains" prediction with
-    an untouched water_level near its default could flood a third of the
-    map, since mountains terrain has a lot of area at low elevation.
+    number for it, but generate_terrain()'s own default depends on the
+    archetype (land-locked ones default to no water at all). So if the
+    prediction sits near the schema default -- meaning the text probably
+    said nothing about water -- pass None and let generate_terrain() pick
+    the right per-archetype default. Otherwise an unmentioned water level
+    can flood a third of a mountain map.
     """
     water_level = params["water_level"]
     water_spec = PARAM_BY_NAME["water_level"]
