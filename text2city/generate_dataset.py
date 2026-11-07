@@ -64,7 +64,7 @@ CITY_ARCHETYPE_PHRASES = {
                     "this city is monocentric"],
     "polycentric": ["with several distinct business districts", "made up of multiple downtown clusters",
                     "with scattered urban centers", "with multiple business hubs",
-                    "with two separate downtown areas", "made up of several separate city centers",
+                    "with separate downtown areas", "made up of several separate city centers",
                     "a polycentric city", "a polycentric layout", "this city is polycentric"],
     "linear": ["stretched out in a long corridor", "elongated along a single axis", "laid out in a line",
                "long and narrow", "thin and elongated in shape", "a linear city", "a linear layout",

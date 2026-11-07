@@ -1,21 +1,13 @@
-# torch: left unpinned deliberately. On Intel Macs, PyTorch only ships
-# wheels up through 2.2.2 (dropped after that) -- pinning a higher
-# version here would make installation impossible on those machines.
+# Install with:  pip install -r text2city/requirements.txt
+#
+# Apple Silicon / Windows / Linux: these three lines are all you need.
 torch
-# numpy<2: torch wheels built before ~2.3 were compiled against NumPy 1.x
-# internals and crash (ABI mismatch) if NumPy 2.x is installed alongside
-# them. Needed specifically for anyone stuck on torch<2.3 (e.g. Intel Macs).
-numpy<2
 scikit-learn
-# sentence-transformers / transformers / huggingface-hub: pinned to an
-# older, known-stable trio rather than "latest". Recent transformers
-# releases check the installed torch version and refuse to enable their
-# PyTorch backend below some rising minimum (2.4, then 2.5, then higher
-# in even newer releases) -- impossible to satisfy on an Intel Mac stuck
-# at torch 2.2.2, and this has caused real crashes (a missing `nn` import
-# inside transformers' own accelerate integration when it thinks torch is
-# unavailable). This exact trio is a version combination other projects
-# have confirmed works with torch in the 2.0-2.2 range.
-sentence-transformers==2.2.2
-transformers==4.30.2
-huggingface-hub==0.16.4
+sentence-transformers
+#
+# INTEL MAC ONLY -- PyTorch stops at 2.2.2 for Intel Macs, and newer
+# transformers refuse to use a torch that old. If `import torch` warns about
+# NumPy or transformers says "Disabling PyTorch", run instead:
+#   pip install "numpy<2"
+#   pip uninstall -y sentence-transformers transformers huggingface-hub tokenizers safetensors
+#   pip install "sentence-transformers==2.2.2" "transformers==4.30.2" "huggingface-hub==0.16.4"
