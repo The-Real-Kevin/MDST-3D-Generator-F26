@@ -1,3 +1,14 @@
+# generated data
+data/*.png
+data/*.npz
+data/*.blend
+data/*.blend1
+data/*.stl
+
+*/.DS_Store
+.DS_Store
+*.DS_Store
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -157,8 +168,6 @@ venv/
 ENV/
 env.bak/
 venv.bak/
-data/
-text2city/checkpoint/
 
 # Spyder project settings
 .spyderproject
