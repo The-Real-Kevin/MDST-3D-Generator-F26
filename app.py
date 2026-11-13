@@ -209,16 +209,18 @@ def _file_url(path: Path) -> str:
     return "gradio_api/file=" + str(path.resolve())
 
 
-def gallery_html(request: gr.Request = None) -> str:
-    """The sidebar list: this visitor's saved cities, newest first, with download links."""
-    return gallery_html_for_folder(gallery_dir(request))
+# a saved city's name: city_<number>_<slug>. Nothing else can be deleted.
+CITY_STEM = re.compile(r"^city_\d+_[a-z0-9-]*$")
+CITY_EXTENSIONS = ("npz", "png", "stl", "glb", "json")
 
 
-def gallery_html_for_folder(folder: Path) -> str:
-    items = []
+def city_entries(folder: Path) -> list:
+    """One (name, html) pair per saved city, newest first -- what the sidebar shows."""
+    entries = []
     for stl in sorted(folder.glob("city_*.stl"), reverse=True):
         stem = stl.with_suffix("")
-        number = stem.name.split("_")[1]
+        if not CITY_STEM.match(stem.name):
+            continue
         info = {}
         if stem.with_suffix(".json").exists():
             try:
@@ -232,12 +234,30 @@ def gallery_html_for_folder(folder: Path) -> str:
         for ext, label, attr in ((".glb", "GLB", "download"), (".png", "PNG", 'target="_blank"')):
             if stem.with_suffix(ext).exists():
                 links.append(f'<a href="{_file_url(stem.with_suffix(ext))}" {attr}>{label}</a>')
-        items.append(f'<div class="city-item"><div class="city-title">City {int(number)}: '
-                     f'{html.escape(title)}</div><div class="city-sub">{html.escape(sub)}</div>'
-                     f'<div class="city-links">{" · ".join(links)}</div></div>')
-    if not items:
-        return '<div class="city-sub">No cities yet. Describe one, or use manual mode.</div>'
-    return '<div class="city-list">' + "".join(items) + "</div>"
+        number = int(stem.name.split("_")[1])
+        entries.append((stem.name, f'<div class="city-title">City {number}: {html.escape(title)}</div>'
+                                   f'<div class="city-sub">{html.escape(sub)}</div>'
+                                   f'<div class="city-links">{" · ".join(links)}</div>'))
+    return entries
+
+
+def gallery_entries(request: gr.Request = None) -> list:
+    return city_entries(gallery_dir(request))
+
+
+def gallery_html_for_folder(folder: Path) -> str:
+    """The same list as plain HTML (used by deploy/smoke_test.py)."""
+    return "".join(body for _, body in city_entries(folder))
+
+
+def delete_city(name: str, request: gr.Request = None) -> list:
+    """Remove ONE saved city's files (.npz .png .stl .glb .json) from this visitor's gallery."""
+    if CITY_STEM.match(name or ""):            # a bare name: no folders, no "..", nothing else
+        folder = gallery_dir(request)
+        for ext in CITY_EXTENSIONS:
+            (folder / f"{name}.{ext}").unlink(missing_ok=True)
+        gr.Info(f"Deleted city {int(name.split('_')[1])}.")
+    return gallery_entries(request)
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +339,7 @@ def answer_prompt(history, size, last, request: gr.Request = None):
     seed = random.randrange(10_000)
     paths = make_city(kwargs, seed, size, text, prompt=text, folder=gallery_dir(request))
     last = {"text": text, "kwargs": kwargs, "seed": seed}
-    return history + reply_messages(kwargs, seed, size, paths), paths["glb"], last, gallery_html(request)
+    return history + reply_messages(kwargs, seed, size, paths), paths["glb"], last, gallery_entries(request)
 
 
 def new_variation(history, size, last, request: gr.Request = None):
@@ -331,7 +351,7 @@ def new_variation(history, size, last, request: gr.Request = None):
     last = {**last, "seed": seed}
     intro = f"New variation of *“{last['text']}”*: same parameters, different seed.\n\n"
     return (history + reply_messages(last["kwargs"], seed, size, paths, intro), paths["glb"], last,
-            gallery_html(request))
+            gallery_entries(request))
 
 
 # ---------------------------------------------------------------------------
@@ -347,7 +367,7 @@ def manual_generate(terrain, city_type, clusters, density, tightness, relief,
     paths = make_city(kwargs, seed, size, "manual", folder=gallery_dir(request))
     summary = (f"{headline(kwargs)} · seed {seed}\n\nRebuild it from a terminal:\n\n"
                f"```\n{command_for(kwargs, seed, size, paths['npz'])}\n```")
-    return paths["png"], paths["glb"], paths["stl"], summary, gallery_html(request)
+    return paths["png"], paths["glb"], paths["stl"], summary, gallery_entries(request)
 
 
 def send_to_manual(last):
@@ -368,14 +388,38 @@ def send_to_manual(last):
             gr.Tabs(selected="manual")]
 
 
+def _asker(name: str):
+    """A click handler that marks this one city as 'waiting for confirmation'."""
+    def ask():
+        return name
+    return ask
+
+
+def _deleter(name: str):
+    """A click handler that deletes this one city (Gradio passes the request in)."""
+    def delete(request: gr.Request):
+        return delete_city(name, request), None
+    return delete
+
+
 # ---------------------------------------------------------------------------
 # the page
 # ---------------------------------------------------------------------------
 CSS = """
 footer { display: none !important; }
-.city-list { max-height: 62vh; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
-.city-item { padding: 8px 10px; border-radius: 8px; background: var(--block-background-fill);
-             border: 1px solid var(--border-color-primary); }
+.city-list { max-height: 62vh; overflow-y: auto; flex-wrap: nowrap !important; gap: 8px !important; }
+.city-item { padding: 8px 6px 8px 10px !important; border-radius: 8px; gap: 6px !important;
+             background: var(--block-background-fill); border: 1px solid var(--border-color-primary); }
+.city-head { flex-wrap: nowrap !important; align-items: flex-start !important; gap: 4px !important; }
+.city-head .city-body { padding: 0 !important; min-width: 0; }
+.trash-btn { min-width: 0 !important; flex-grow: 0 !important; padding: 2px 9px !important;
+             font-size: 1.05em !important; opacity: 0.75; }
+.trash-btn:hover { opacity: 1; }
+.city-confirm { font-size: 0.85em; font-weight: 600; }
+.confirm-row { gap: 6px !important; flex-wrap: nowrap !important; }
+.confirm-row button { min-width: 0 !important; }
+.confirm-delete { background: #dc2626 !important; color: white !important; border-color: #dc2626 !important; }
+.confirm-delete:hover { background: #b91c1c !important; }
 .city-title { font-weight: 600; font-size: 0.92em; line-height: 1.3; }
 .city-sub { font-size: 0.8em; opacity: 0.7; margin: 2px 0 4px; }
 .city-links a { font-size: 0.85em; }
@@ -390,7 +434,32 @@ def build_ui() -> gr.Blocks:
 
         with gr.Sidebar(open=True, width=330):
             gr.Markdown("### Your cities")
-            gallery = gr.HTML("" if HOSTED else gallery_html())
+            gallery = gr.State([])           # [(name, html), ...] -- the list below redraws when it changes
+            pending = gr.State(None)         # the city whose trash button was clicked once
+
+            @gr.render(inputs=[gallery, pending])
+            def show_gallery(entries, waiting):
+                if not entries:
+                    gr.HTML('<div class="city-sub">No cities yet. Describe one, or use manual mode.</div>')
+                    return
+                with gr.Column(elem_classes="city-list"):
+                    for name, body in entries:
+                        with gr.Column(elem_classes="city-item"):
+                            with gr.Row(elem_classes="city-head", equal_height=False):
+                                gr.HTML(body, elem_classes="city-body", padding=False)
+                                if name != waiting:
+                                    trash = gr.Button("\U0001F5D1", size="sm", scale=0, elem_classes="trash-btn")
+                                    trash.click(_asker(name), None, pending)
+                            if name == waiting:         # second step, on its own line
+                                gr.HTML('<div class="city-confirm">Delete this city and its files?</div>',
+                                        padding=False)
+                                with gr.Row(elem_classes="confirm-row"):
+                                    yes = gr.Button("Delete", size="sm", variant="stop", elem_classes="confirm-delete")
+                                    no = gr.Button("Cancel", size="sm")
+                                yes.click(_deleter(name), None, [gallery, pending])
+                                # (no queue=False on these: a State changed by an unqueued
+                                # event doesn't redraw the list in Gradio 5)
+                                no.click(lambda: None, None, pending)
             size = gr.Radio(SIZES, value=128, label="Grid size",
                             info="Bigger = more detail, slower and larger files")
             if HOSTED:
@@ -477,7 +546,7 @@ def build_ui() -> gr.Blocks:
         dice.click(lambda: random.randrange(10_000), None, seed, queue=False)
         generate_btn.click(manual_generate, manual_inputs + [size],
                            [manual_png, manual_view, manual_stl, manual_info, gallery], **busy)
-        demo.load(gallery_html, None, gallery)
+        demo.load(gallery_entries, None, gallery)
     return demo
 
 
