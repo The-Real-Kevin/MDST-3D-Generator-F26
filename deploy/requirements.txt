@@ -1,0 +1,15 @@
+# What the Hugging Face Space installs (Linux, Python 3.11). Gradio itself
+# comes from sdk_version in deploy/README.md, so it isn't listed here.
+#
+# These are the versions the app was tested with. The extra index gives the
+# CPU-only build of torch (~200 MB instead of ~2.5 GB of CUDA libraries);
+# a free Space has no GPU anyway.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.2
+numpy==1.26.4
+scipy==1.17.1
+matplotlib==3.11.2
+scikit-learn==1.9.1
+transformers==4.57.6
+sentence-transformers==5.7.0
+huggingface-hub==0.36.2

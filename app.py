@@ -6,6 +6,10 @@ City Generator: the visual interface.
     python app.py --share         # also prints a temporary public link
     python app.py --port 8000     # a different port
 
+Hosted (e.g. a Hugging Face Space, detected by its SPACE_ID variable, or
+CITYGEN_HOSTED=1): each visitor gets their own gallery, and galleries older
+than a few hours are deleted so the disk never fills up.
+
 Two modes:
   Prompt mode   describe a city in plain English; your text2city model picks
                 the 10 parameters and citygen builds the city
@@ -19,8 +23,11 @@ No Blender needed: the meshes come from citygen/mesh.py.
 import argparse
 import html
 import json
+import os
 import random
 import re
+import shutil
+import time
 import sys
 import threading
 from pathlib import Path
@@ -52,6 +59,8 @@ GALLERY = ROOT / "data" / "gallery"
 CHECKPOINT = ROOT / "text2city" / "checkpoint"
 DATASET = ROOT / "data" / "text2city_dataset.csv"
 SIZES = [64, 96, 128, 160]
+HOSTED = bool(os.environ.get("SPACE_ID") or os.environ.get("CITYGEN_HOSTED"))
+HOSTED_KEEP_HOURS = 6       # hosted: delete a visitor's cities this long after their last one
 CAMERA = (-120, 55, None)   # 3D view: (rotation, tilt from straight down, distance) in degrees
 BACKGROUND = (0.94, 0.95, 0.93, 1.0)
 
@@ -118,14 +127,35 @@ MODEL = TextModel()
 _name_lock = threading.Lock()
 
 
-def _next_stem(label: str) -> Path:
-    """data/gallery/city_007_a-harbour-city -- numbered, so the list stays in order."""
+def gallery_dir(request: gr.Request = None) -> Path:
+    """
+    Where this visitor's cities go. Locally there's one user, so everything
+    lands in data/gallery/. Hosted, each browser session gets its own
+    subfolder, so visitors never see (or download) each other's cities.
+    """
+    if HOSTED and request is not None and getattr(request, "session_hash", None):
+        return GALLERY / re.sub(r"[^A-Za-z0-9_-]", "", request.session_hash)
+    return GALLERY
+
+
+def _cleanup_old_sessions() -> None:
+    """Hosted only: remove session folders nobody has added to for HOSTED_KEEP_HOURS."""
+    if not HOSTED or not GALLERY.exists():
+        return
+    cutoff = time.time() - HOSTED_KEEP_HOURS * 3600
+    for folder in GALLERY.iterdir():
+        if folder.is_dir() and folder.stat().st_mtime < cutoff:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+def _next_stem(label: str, folder: Path) -> Path:
+    """<gallery>/city_007_a-harbour-city -- numbered, so the list stays in order."""
     with _name_lock:
-        GALLERY.mkdir(parents=True, exist_ok=True)
-        numbers = [int(m.group(1)) for p in GALLERY.glob("city_*.npz")
+        folder.mkdir(parents=True, exist_ok=True)
+        numbers = [int(m.group(1)) for p in folder.glob("city_*.npz")
                    if (m := re.match(r"city_(\d+)", p.name))]
         slug = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")[:40].strip("-") or "city"
-        stem = GALLERY / f"city_{max(numbers, default=0) + 1:03d}_{slug}"
+        stem = folder / f"city_{max(numbers, default=0) + 1:03d}_{slug}"
         Path(f"{stem}.npz").touch()          # claim the number before releasing the lock
         return stem
 
@@ -159,10 +189,12 @@ def render_preview(city, path: str, title: str) -> None:
     fig.savefig(path, dpi=110)
 
 
-def make_city(kwargs: dict, seed: int, size: int, label: str, prompt: str = None) -> dict:
+def make_city(kwargs: dict, seed: int, size: int, label: str, prompt: str = None,
+              folder: Path = GALLERY) -> dict:
     """Build one city and save its files (.npz .png .stl .glb .json). Returns their paths."""
+    _cleanup_old_sessions()
     city = build_city(size=int(size), seed=int(seed), **kwargs)
-    stem = _next_stem(label)
+    stem = _next_stem(label, folder)
     paths = {ext: f"{stem}.{ext}" for ext in ("npz", "png", "stl", "glb", "json")}
     city.save(paths["npz"])
     Path(paths["json"]).write_text(json.dumps(
@@ -177,10 +209,14 @@ def _file_url(path: Path) -> str:
     return "gradio_api/file=" + str(path.resolve())
 
 
-def gallery_html() -> str:
-    """The sidebar list: every saved city, newest first, with download links."""
+def gallery_html(request: gr.Request = None) -> str:
+    """The sidebar list: this visitor's saved cities, newest first, with download links."""
+    return gallery_html_for_folder(gallery_dir(request))
+
+
+def gallery_html_for_folder(folder: Path) -> str:
     items = []
-    for stl in sorted(GALLERY.glob("city_*.stl"), reverse=True):
+    for stl in sorted(folder.glob("city_*.stl"), reverse=True):
         stem = stl.with_suffix("")
         number = stem.name.split("_")[1]
         info = {}
@@ -273,7 +309,7 @@ def _text_of(content) -> str:
     return ""
 
 
-def answer_prompt(history, size, last):
+def answer_prompt(history, size, last, request: gr.Request = None):
     if not history or history[-1]["role"] != "user":
         return history, gr.update(), last, gr.update()
     text = _text_of(history[-1]["content"]).strip()
@@ -281,36 +317,37 @@ def answer_prompt(history, size, last):
         return history + [{"role": "assistant", "content": MODEL.error}], gr.update(), last, gr.update()
     kwargs = to_generator_kwargs(MODEL.params(text))
     seed = random.randrange(10_000)
-    paths = make_city(kwargs, seed, size, text, prompt=text)
+    paths = make_city(kwargs, seed, size, text, prompt=text, folder=gallery_dir(request))
     last = {"text": text, "kwargs": kwargs, "seed": seed}
-    return history + reply_messages(kwargs, seed, size, paths), paths["glb"], last, gallery_html()
+    return history + reply_messages(kwargs, seed, size, paths), paths["glb"], last, gallery_html(request)
 
 
-def new_variation(history, size, last):
+def new_variation(history, size, last, request: gr.Request = None):
     if not last:
         gr.Info("Describe a city first.")
         return history, gr.update(), last, gr.update()
     seed = random.randrange(10_000)
-    paths = make_city(last["kwargs"], seed, size, last["text"], prompt=last["text"])
+    paths = make_city(last["kwargs"], seed, size, last["text"], prompt=last["text"], folder=gallery_dir(request))
     last = {**last, "seed": seed}
     intro = f"New variation of *“{last['text']}”*: same parameters, different seed.\n\n"
-    return history + reply_messages(last["kwargs"], seed, size, paths, intro), paths["glb"], last, gallery_html()
+    return (history + reply_messages(last["kwargs"], seed, size, paths, intro), paths["glb"], last,
+            gallery_html(request))
 
 
 # ---------------------------------------------------------------------------
 # manual mode
 # ---------------------------------------------------------------------------
 def manual_generate(terrain, city_type, clusters, density, tightness, relief,
-                    water_auto, water, green, override, roads, seed, size):
+                    water_auto, water, green, override, roads, seed, size, request: gr.Request = None):
     kwargs = {"terrain_archetype": terrain, "city_archetype": city_type, "clusters": int(clusters),
               "density": float(density), "cluster_tightness": float(tightness), "relief": float(relief),
               "water_level": None if water_auto else float(water), "green_amount": float(green),
               "green_override": bool(override), "road_continuity": float(roads)}
     seed = int(seed) if seed is not None else 0
-    paths = make_city(kwargs, seed, size, "manual")
+    paths = make_city(kwargs, seed, size, "manual", folder=gallery_dir(request))
     summary = (f"{headline(kwargs)} · seed {seed}\n\nRebuild it from a terminal:\n\n"
                f"```\n{command_for(kwargs, seed, size, paths['npz'])}\n```")
-    return paths["png"], paths["glb"], paths["stl"], summary, gallery_html()
+    return paths["png"], paths["glb"], paths["stl"], summary, gallery_html(request)
 
 
 def send_to_manual(last):
@@ -353,11 +390,15 @@ def build_ui() -> gr.Blocks:
 
         with gr.Sidebar(open=True, width=330):
             gr.Markdown("### Your cities")
-            gallery = gr.HTML(gallery_html())
+            gallery = gr.HTML("" if HOSTED else gallery_html())
             size = gr.Radio(SIZES, value=128, label="Grid size",
                             info="Bigger = more detail, slower and larger files")
-            gr.Markdown("Every city is saved in `data/gallery/`: the 2D preview, the grid, "
-                        "a printable `.stl` and a coloured `.glb`.")
+            if HOSTED:
+                gr.Markdown(f"Your cities are private to this browser tab and kept for about "
+                            f"{HOSTED_KEEP_HOURS} hours. Download the `.stl` to keep or 3D-print one.")
+            else:
+                gr.Markdown("Every city is saved in `data/gallery/`: the 2D preview, the grid, "
+                            "a printable `.stl` and a coloured `.glb`.")
 
         gr.Markdown("# City Generator")
         with gr.Tabs() as tabs:
@@ -454,8 +495,11 @@ def main():
     GALLERY.mkdir(parents=True, exist_ok=True)
 
     launch_kwargs = {"theme": gr.themes.Soft(primary_hue="green"), "css": CSS} if GRADIO_6 else {}
-    build_ui().queue().launch(server_port=args.port, share=args.share, inbrowser=not args.no_browser,
-                              allowed_paths=[str(GALLERY)], **launch_kwargs)
+    if HOSTED:
+        print(f"hosted mode: per-visitor galleries, kept {HOSTED_KEEP_HOURS} h")
+    build_ui().queue(default_concurrency_limit=2).launch(
+        server_port=args.port, share=args.share and not HOSTED, inbrowser=not (args.no_browser or HOSTED),
+        allowed_paths=[str(GALLERY)], **launch_kwargs)
 
 
 if __name__ == "__main__":
