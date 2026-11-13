@@ -1,0 +1,63 @@
+# Every push to main: build the Space folder, test it, upload it to Hugging Face.
+#
+# One-time setup (GitHub repo > Settings > Secrets and variables > Actions):
+#   Secrets   > New repository secret    HF_TOKEN = a Hugging Face WRITE token
+#   Variables > New repository variable  HF_SPACE = <your-hf-username>/mdst-city-generator
+# The Space is created automatically on the first run.
+
+name: Deploy to Hugging Face Space
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:          # the "Run workflow" button on the Actions tab
+
+concurrency:                  # a newer push cancels an older, still-running deploy
+  group: deploy-space
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_SPACE: ${{ vars.HF_SPACE }}
+    steps:
+      - name: Check the settings exist
+        run: |
+          if [ -z "$HF_TOKEN" ] || [ -z "$HF_SPACE" ]; then
+            echo "::error::Add the HF_TOKEN secret and the HF_SPACE variable: repo Settings > Secrets and variables > Actions"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Assemble the Space folder (only what the app needs)
+        run: |
+          for f in app.py citygen scripts text2city text2city/checkpoint/model.pt data/text2city_dataset.csv; do
+            test -e "$f" || { echo "::error::$f is missing from the repo"; exit 1; }
+          done
+          mkdir -p space/data
+          cp -r app.py citygen scripts text2city space/
+          cp data/text2city_dataset.csv space/data/
+          cp deploy/README.md deploy/requirements.txt space/
+          find space -name "__pycache__" -type d -prune -exec rm -rf {} +
+          du -sh space
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: deploy/requirements.txt
+
+      - name: Install exactly what the Space installs
+        run: pip install -r deploy/requirements.txt "gradio==5.50.0"
+
+      - name: Smoke test (the model loads, a sentence becomes a city)
+        working-directory: space
+        run: python ../deploy/smoke_test.py
+
+      - name: Upload to the Space
+        run: |
+          find space -name "__pycache__" -type d -prune -exec rm -rf {} +
+          python deploy/deploy_to_space.py space
