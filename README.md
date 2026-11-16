@@ -160,18 +160,4 @@ blocking on each other. Everything added in this update (green space,
 road gaps, building merging) works entirely within this existing schema —
 no new channels were needed.
 
-## Known tuning TODOs (not bugs, just first-pass defaults)
 
-- `water_level`/`relief` interact loosely with archetype-specific shaping
-  (e.g. very high relief on `coastal_harbor` can push the coastline
-  around a bit) — fine for now, just don't expect them to be perfectly
-  orthogonal at extreme values.
-- Road placement is still a fixed-spacing grid underneath the gap logic,
-  not routed around the city archetype's actual center — worth revisiting
-  once Geometry Nodes needs proper connected road meshes.
-- No footprint/shape mask yet (square grid only) — circular/elliptical/
-  custom-shape grids are a planned addition, applied as a boundary mask
-  on top of `CityGrid` rather than a change to its structure.
-- Building merging only applies to "short" buildings by design (real
-  row-house/townhouse rows are typically low-rise); mid/tall buildings
-  are intentionally never merged.
